@@ -3,6 +3,8 @@
   let selectedPlatform = 'auto';
   let customSounds = [];
   let memesList = [];
+  let userPlaylists = [];
+  const expandedPlaylistIds = new Set();
   let memeRegion = 'ru';
   let eventSource = null;
   let lastProgressSec = 0;
@@ -95,6 +97,7 @@
       connectSSE();
       loadCustomSounds();
       loadMemes();
+      loadPlaylists();
     } catch (err) {
       showView('login-view');
     }
@@ -113,6 +116,10 @@
 
     eventSource.addEventListener('sounds', () => {
       loadCustomSounds();
+    });
+
+    eventSource.addEventListener('playlists', () => {
+      loadPlaylists();
     });
 
     eventSource.onerror = () => {
@@ -203,6 +210,7 @@
     renderPlayer(inVoice, worker);
     renderQueue(inVoice, worker);
     renderAgents(state.pool);
+    renderPlaylists();
     // Обновляем состояние кнопок саундборда (доступность в войсе)
     renderCustomSounds();
     renderMemes();
@@ -320,8 +328,15 @@
 
   function renderQueue(inVoice, worker) {
     const queue = worker?.queue || [];
+    const hasAnyTrack = Boolean(worker && (worker.currentTrack || queue.length > 0));
     $('queue-count').textContent = String(queue.length);
     $('btn-clear-queue').disabled = !inVoice || !worker || queue.length === 0;
+    $('btn-save-playlist-toggle').disabled = !inVoice || !hasAnyTrack;
+    $('playlists-save-name').disabled = !inVoice || !hasAnyTrack;
+    $('btn-playlists-save-submit').disabled = !inVoice || !hasAnyTrack;
+    if (!inVoice || !hasAnyTrack) {
+      $('save-playlist-form').classList.add('hidden');
+    }
 
     const listEl = $('queue-list');
     if (queue.length === 0) {
@@ -492,11 +507,155 @@
       .join('');
   }
 
+  // ==================== Личные сохранённые плейлисты ====================
+  async function loadPlaylists() {
+    try {
+      const data = await api('/api/playlists');
+      userPlaylists = data.playlists || [];
+      renderPlaylists();
+    } catch {}
+  }
+
+  function renderPlaylists() {
+    const badge = $('playlists-count-badge');
+    if (badge) badge.textContent = String(userPlaylists.length);
+
+    const listEl = $('playlists-list');
+    if (!listEl) return;
+
+    const inVoice = Boolean(state?.voice?.inVoice);
+
+    if (userPlaylists.length === 0) {
+      listEl.innerHTML =
+        '<div class="empty-state small">У вас пока нет сохранённых плейлистов. Включите музыку и нажмите «💾 Сохранить» рядом с очередью!</div>';
+      return;
+    }
+
+    listEl.innerHTML = userPlaylists
+      .map((p) => {
+        const totalSec = (p.tracks || []).reduce((acc, t) => acc + (Number(t.durationSec) || 0), 0);
+        const durStr = totalSec > 0 ? formatDuration(totalSec) : '';
+        const updatedDate = p.updatedAt
+          ? new Date(p.updatedAt).toLocaleString('ru-RU', {
+              day: '2-digit',
+              month: '2-digit',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : '';
+        const isExpanded = expandedPlaylistIds.has(p.id);
+        const tracksHtml = isExpanded
+          ? `<div class="playlist-tracks">${(p.tracks || [])
+              .map((t, i) => {
+                const dot = t.source === 'spotify' ? '🟢' : t.source === 'soundcloud' ? '🟠' : '🔴';
+                const href = escapeHtml(t.originalUrl || '#');
+                return `
+                  <div class="playlist-track-row">
+                    <span class="playlist-track-idx">${i + 1}.</span>
+                    <span>${dot}</span>
+                    <a class="playlist-track-link" href="${href}" target="_blank" rel="noopener" title="${escapeHtml(t.title)} — ${escapeHtml(t.author)}">${escapeHtml(t.title)} <span class="muted">— ${escapeHtml(t.author)}</span></a>
+                    <span class="playlist-track-dur">${escapeHtml(t.durationFormatted || '0:00')}</span>
+                  </div>
+                `;
+              })
+              .join('')}</div>`
+          : '';
+
+        return `
+          <div class="playlist-card">
+            <div class="playlist-card-head">
+              <div class="playlist-info">
+                <div class="playlist-name">🎵 ${escapeHtml(p.name)}</div>
+                <div class="playlist-meta">
+                  <span>Треков: <strong>${p.trackCount}</strong></span>
+                  ${durStr ? `<span>• ${escapeHtml(durStr)}</span>` : ''}
+                  ${updatedDate ? `<span>• обновлён ${escapeHtml(updatedDate)}</span>` : ''}
+                </div>
+              </div>
+              <div class="playlist-actions">
+                <button
+                  class="btn btn-primary btn-sm"
+                  data-load-playlist="${p.id}"
+                  ${!inVoice ? 'disabled' : ''}
+                  title="${inVoice ? 'Заменить текущую очередь этим плейлистом' : 'Зайдите в голосовой канал'}"
+                >▶ Восстановить</button>
+                <button
+                  class="btn btn-secondary btn-sm"
+                  data-toggle-playlist="${p.id}"
+                >${isExpanded ? '▲ Скрыть' : '📋 Треки'}</button>
+                <button
+                  class="icon-btn danger"
+                  data-delete-playlist="${p.id}"
+                  title="Удалить плейлист"
+                >🗑</button>
+              </div>
+            </div>
+            ${tracksHtml}
+          </div>
+        `;
+      })
+      .join('');
+  }
+
+  async function saveCurrentQueueAsPlaylist(rawName, submitBtn) {
+    const name = rawName.trim();
+    if (!name) {
+      showToast('Введите название плейлиста', 'error');
+      return false;
+    }
+    const origText = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '⏳...';
+    try {
+      const res = await api('/api/playlists/save', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      showToast(
+        res.overwritten
+          ? `💾 Плейлист «${res.playlist.name}» обновлён (${res.playlist.trackCount} тр.)`
+          : `💾 Плейлист «${res.playlist.name}» сохранён (${res.playlist.trackCount} тр.)`,
+        'success'
+      );
+      await loadPlaylists();
+      return true;
+    } catch (err) {
+      showToast(err.message, 'error');
+      return false;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = origText;
+    }
+  }
+
   // ==================== Админские настройки ====================
+  function renderCookiesStatus(status) {
+    const el = $('cookies-status');
+    if (!el) return;
+    if (status && status.hasCookies) {
+      el.className = 'cookies-status active';
+      if (status.source === 'file') {
+        const dt = status.updatedAt
+          ? new Date(status.updatedAt).toLocaleString('ru-RU')
+          : '';
+        el.textContent = `✅ Активны из data/cookies.txt • строк: ${status.lineCount}${dt ? ` • обновлены: ${dt}` : ''}`;
+      } else {
+        el.textContent = '✅ Активны из переменной YT_COOKIE (.env)';
+      }
+    } else {
+      el.className = 'cookies-status empty';
+      el.textContent = '⚠️ Cookies не загружены — работает режим без авторизации + фолбэк через SoundCloud';
+    }
+  }
+
   async function loadAdminSettings() {
     if (!state?.user?.isAdmin) return;
     try {
-      const data = await api('/api/admin/settings');
+      const [data, cookiesStatus] = await Promise.all([
+        api('/api/admin/settings'),
+        api('/api/admin/cookies').catch(() => null),
+      ]);
       const select = $('required-role-select');
       select.innerHTML = '<option value="">🌐 Доступ открыт всем участникам сервера</option>';
       for (const r of data.roles || []) {
@@ -506,6 +665,7 @@
         if (data.requiredRoleId === r.id) opt.selected = true;
         select.appendChild(opt);
       }
+      if (cookiesStatus) renderCookiesStatus(cookiesStatus);
     } catch (err) {
       showToast(err.message, 'error');
     }
@@ -519,6 +679,7 @@
       document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
       document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${tab}`));
       if (tab === 'admin') loadAdminSettings();
+      if (tab === 'playlists') loadPlaylists();
     });
   });
 
@@ -919,6 +1080,177 @@
         body: JSON.stringify({ requiredRoleId: roleId }),
       });
       showToast('💾 Настройки доступа сохранены!', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+
+  // Сохранение / восстановление / удаление личных плейлистов
+  $('btn-save-playlist-toggle').addEventListener('click', () => {
+    const form = $('save-playlist-form');
+    form.classList.toggle('hidden');
+    if (!form.classList.contains('hidden')) {
+      $('save-playlist-name').focus();
+    }
+  });
+
+  $('btn-save-playlist-cancel').addEventListener('click', () => {
+    $('save-playlist-form').classList.add('hidden');
+    $('save-playlist-name').value = '';
+  });
+
+  $('save-playlist-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ok = await saveCurrentQueueAsPlaylist(
+      $('save-playlist-name').value,
+      $('btn-save-playlist-submit')
+    );
+    if (ok) {
+      $('save-playlist-name').value = '';
+      $('save-playlist-form').classList.add('hidden');
+    }
+  });
+
+  $('playlists-save-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ok = await saveCurrentQueueAsPlaylist(
+      $('playlists-save-name').value,
+      $('btn-playlists-save-submit')
+    );
+    if (ok) {
+      $('playlists-save-name').value = '';
+    }
+  });
+
+  $('playlists-list').addEventListener('click', async (e) => {
+    const toggleBtn = e.target.closest('button[data-toggle-playlist]');
+    if (toggleBtn) {
+      const id = Number(toggleBtn.dataset.togglePlaylist);
+      if (expandedPlaylistIds.has(id)) {
+        expandedPlaylistIds.delete(id);
+      } else {
+        expandedPlaylistIds.add(id);
+      }
+      renderPlaylists();
+      return;
+    }
+
+    const delBtn = e.target.closest('button[data-delete-playlist]');
+    if (delBtn) {
+      const id = Number(delBtn.dataset.deletePlaylist);
+      const pl = userPlaylists.find((p) => p.id === id);
+      if (!confirm(`Удалить плейлист «${pl?.name || ''}»?`)) return;
+      try {
+        await api(`/api/playlists/${id}`, { method: 'DELETE' });
+        expandedPlaylistIds.delete(id);
+        showToast(`🗑️ Плейлист «${pl?.name || ''}» удалён`, 'info');
+        loadPlaylists();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+      return;
+    }
+
+    const loadBtn = e.target.closest('button[data-load-playlist]');
+    if (loadBtn) {
+      const id = Number(loadBtn.dataset.loadPlaylist);
+      const pl = userPlaylists.find((p) => p.id === id);
+      const hasActiveQueue = Boolean(
+        state?.myWorker && (state.myWorker.currentTrack || (state.myWorker.queue?.length || 0) > 0)
+      );
+      if (
+        hasActiveQueue &&
+        !confirm(
+          `Заменить текущую очередь канала на плейлист «${pl?.name || ''}»? Текущие треки будут стёрты.`
+        )
+      ) {
+        return;
+      }
+
+      loadBtn.disabled = true;
+      const orig = loadBtn.textContent;
+      loadBtn.textContent = '⏳ Загружаю...';
+      try {
+        const res = await api('/api/playlists/load', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        });
+        showToast(
+          `💾 Восстановлен «${res.playlistName}» (${res.loadedCount} тр.) — играет: ${res.firstTrack?.title || ''}`,
+          'success'
+        );
+      } catch (err) {
+        showToast(err.message, 'error');
+      } finally {
+        loadBtn.textContent = orig;
+        loadBtn.disabled = !state?.voice?.inVoice;
+      }
+    }
+  });
+
+  // Админ: YouTube Cookies (выбор файла, загрузка, перечитывание, удаление)
+  $('cookies-file').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    $('cookies-file-label').textContent = `📄 ${file.name}`;
+    try {
+      const text = await file.text();
+      $('cookies-textarea').value = text;
+      showToast(`📄 Файл «${file.name}» прочитан — нажмите «Загрузить и применить»`, 'info');
+    } catch {
+      showToast('Не удалось прочитать файл cookies.txt', 'error');
+    }
+  });
+
+  $('btn-cookies-save').addEventListener('click', async () => {
+    const content = $('cookies-textarea').value.trim();
+    if (!content) {
+      showToast('Выберите файл cookies.txt или вставьте его содержимое в поле выше', 'error');
+      return;
+    }
+    const btn = $('btn-cookies-save');
+    btn.disabled = true;
+    btn.textContent = '⏳ Проверяю и применяю...';
+    try {
+      const res = await api('/api/admin/cookies', {
+        method: 'POST',
+        body: JSON.stringify({ content }),
+      });
+      renderCookiesStatus(res.status);
+      $('cookies-textarea').value = '';
+      $('cookies-file').value = '';
+      $('cookies-file-label').textContent = '📄 Выбрать файл cookies.txt';
+      showToast('🍪 YouTube cookies успешно сохранены и применены без перезапуска!', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '💾 Загрузить и применить';
+    }
+  });
+
+  $('btn-cookies-reload').addEventListener('click', async () => {
+    const btn = $('btn-cookies-reload');
+    btn.disabled = true;
+    try {
+      const res = await api('/api/admin/cookies/reload', { method: 'POST' });
+      renderCookiesStatus(res.status);
+      showToast('🔄 Cookies перечитаны с диска и применены!', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('btn-cookies-clear').addEventListener('click', async () => {
+    if (!confirm('Удалить файл data/cookies.txt и переключить YouTube на работу без cookies?')) {
+      return;
+    }
+    try {
+      const res = await api('/api/admin/cookies', { method: 'DELETE' });
+      renderCookiesStatus(res.status);
+      showToast('🗑️ Файл cookies.txt удалён', 'info');
     } catch (err) {
       showToast(err.message, 'error');
     }

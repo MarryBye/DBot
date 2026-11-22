@@ -263,6 +263,34 @@ export class AudioQueue {
   }
 
   /**
+   * Полностью стирает текущую очередь и играющий трек (не отключая агента из канала!)
+   * и ставит на воспроизведение новый список треков (например, сохранённый плейлист).
+   */
+  public async replaceQueue(tracks: Track[]): Promise<{ loadedCount: number; firstTrack: Track }> {
+    if (tracks.length === 0) {
+      throw new Error('Плейлист пуст.');
+    }
+
+    this.clearIdleTimer();
+    this.mixer.clearMusic();
+    this.tracks = [];
+    this.currentTrack = null;
+    this.isPaused = false;
+    this.startedAt = null;
+    this.pausedAt = null;
+    this.totalPausedMs = 0;
+
+    const [first, ...rest] = tracks;
+    this.tracks.push(...rest);
+    await this.play(first);
+
+    return {
+      loadedCount: tracks.length,
+      firstTrack: first,
+    };
+  }
+
+  /**
    * Проигрывание звука саундборда ПОВЕРХ текущей музыки!
    * AudioMixer плавно приглушает музыку до 18%, накладывает мем на полной громкости,
    * а после завершения мема плавно возвращает громкость музыки обратно.

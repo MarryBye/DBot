@@ -46,9 +46,24 @@ export const dashboardSettings = sqliteTable('dashboard_settings', {
     .$defaultFn(() => new Date()),
 });
 
+export const userPlaylists = sqliteTable('user_playlists', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: text('user_id').notNull(),
+  name: text('name').notNull(),
+  tracksJson: text('tracks_json').notNull(),
+  trackCount: integer('track_count').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export type Note = typeof notes.$inferSelect;
 export type NewNote = typeof notes.$inferInsert;
 export type SoundRecord = typeof sounds.$inferSelect;
 export type NewSoundRecord = typeof sounds.$inferInsert;
 export type WebSession = typeof webSessions.$inferSelect;
 export type DashboardSetting = typeof dashboardSettings.$inferSelect;
+export type UserPlaylistRecord = typeof userPlaylists.$inferSelect;

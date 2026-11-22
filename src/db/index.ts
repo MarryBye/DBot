@@ -57,6 +57,16 @@ sqlite.exec(`
     required_role_id TEXT,
     updated_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS user_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tracks_json TEXT NOT NULL,
+    track_count INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 `);
 
 // Мягкая миграция: добавляем active_guild_id, если база создавалась ранее

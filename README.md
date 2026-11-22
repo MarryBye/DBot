@@ -65,6 +65,7 @@ flowchart LR
 | `/volume <1-100>` | `+volume`, `+vol` | Регулировка громкости |
 | `/loop <off\|track\|queue>` | `+loop` | Зацикливание трека или очереди |
 | `/shuffle` | `+shuffle` | Перемешать треки в очереди |
+| `/playlist save\|load\|list\|show\|delete` | `+playlist`, `+pl` | Личные сохранённые плейлисты (сохранение текущей очереди и восстановление с заменой) |
 | `/sound play\|meme\|upload\|list\|delete` | `+sound`, `+sfx`, `+meme` | Саундборд: свои звуки, мемы MyInstants, загрузка файлов |
 | `/web` | `+web`, `+panel` | Получить персональную ссылку для мгновенного входа в веб-панель |
 | `/health` | `+health` | Диагностика состояния и замер реального времени ответа всех 6 ботов |
@@ -190,14 +191,16 @@ cd ~/dbot && git pull && pnpm install && pnpm build && sudo systemctl restart db
 2. **Полный доступ к любым видео YouTube через `cookies.txt`:**
    1. Установите в браузер (Edge / Chrome) расширение **Get cookies.txt LOCALLY**.
    2. В Edge разрешите его в режиме инкогнито: `edge://extensions` → **Подробнее** → включите **«Разрешить в режиме InPrivate»** *(в Chrome: `chrome://extensions` → «Разрешить в режиме инкогнито»)*.
-   3. Откройте новое окно **InPrivate / Инкогнито** (`Ctrl + Shift + N`) и войдите на `youtube.com` *(рекомендуется использовать отдельный/запасной Google-аккаунт)*.
-   4. На странице YouTube откройте расширение и нажмите **Export** — сохранится файл `cookies.txt`.
+   3. Откройте новое окно **InPrivate / Инкогнито** (`Ctrl + Shift + N`), войдите на `youtube.com` *(рекомендуется отдельный/запасной Google-аккаунт)* и сразу перейдите на `https://www.youtube.com/robots.txt` *(чтобы YouTube не ротировал сессию при открытой вкладке)*.
+   4. На странице `youtube.com/robots.txt` откройте расширение и нажмите **Export** — сохранится файл `cookies.txt`.
    5. **Просто закройте окно инкогнито крестиком** *(не нажимайте «Выйти из аккаунта», иначе YouTube аннулирует сессию)*.
-   6. Загрузите файл на сервер в папку `~/dbot/data/cookies.txt` *(файлы `cookies.txt` и `data/` уже добавлены в `.gitignore` и никогда не попадут в Git)*:
+   6. **Способ А (рекомендуется — прямо через веб-панель без SSH и перезапуска):**
+      Откройте веб-панель бота → вкладка **«⚙️ Настройки»** *(видна администраторам сервера)* → блок **«🍪 YouTube Cookies»** → выберите файл `cookies.txt` (или вставьте текст) и нажмите **«💾 Загрузить и применить»**. Бот сразу провалидирует cookies, сохранит `data/cookies.txt` и применит их на лету!
+   7. **Способ Б (через SSH/SCP вручную):**
+      Загрузите файл на сервер в папку `~/dbot/data/cookies.txt` *(файлы `cookies.txt` и `data/` добавлены в `.gitignore` и никогда не попадут в Git)* и нажмите в веб-панели **«🔄 Перечитать с диска»** (или перезапустите службу):
       ```powershell
       scp -i "$HOME\.ssh\oracle_dbot" "C:\путь\к\cookies.txt" ubuntu@<ВАШ_IP>:~/dbot/data/cookies.txt
       ```
-   7. Перезапустите бота на сервере и проверьте лог:
       ```bash
       sudo systemctl restart dbot
       journalctl -u dbot -n 20 --no-pager
@@ -212,7 +215,7 @@ cd ~/dbot && git pull && pnpm install && pnpm build && sudo systemctl restart db
 DBot/
 ├── public/                 # SPA веб-панель (HTML, CSS, Vanilla JS + SSE)
 ├── src/
-│   ├── commands/           # 19 дуальных команд (/ и +)
+│   ├── commands/           # 20 дуальных команд (/ и +)
 │   ├── db/                 # Схема Drizzle ORM и инициализация SQLite
 │   ├── voice/              # VoiceWorkerPool, AudioQueue, MusicResolver, Soundboard (MyInstants)
 │   ├── web/                # Встроенный HTTP-сервер, Auth (OAuth2 + /web), SSE

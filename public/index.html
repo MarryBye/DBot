@@ -85,9 +85,10 @@
     <!-- Навигация -->
     <nav class="tabs">
       <button class="tab-btn active" data-tab="player">🎵 Плеер и очередь</button>
+      <button class="tab-btn" data-tab="playlists">💾 Плейлисты <span id="playlists-count-badge" class="pill-count">0</span></button>
       <button class="tab-btn" data-tab="soundboard">🔊 Саундборд</button>
       <button class="tab-btn" data-tab="agents">🎙️ Агенты <span id="agents-count-badge" class="pill-count">0/0</span></button>
-      <button id="admin-tab-btn" class="tab-btn hidden" data-tab="admin">⚙️ Роли доступа</button>
+      <button id="admin-tab-btn" class="tab-btn hidden" data-tab="admin">⚙️ Настройки</button>
     </nav>
 
     <main class="content">
@@ -173,11 +174,52 @@
           <div class="card queue-card">
             <div class="card-header-row">
               <h2>Очередь <span id="queue-count" class="pill-count">0</span></h2>
-              <button id="btn-clear-queue" class="btn btn-ghost btn-sm">🗑️ Очистить</button>
+              <div class="header-actions">
+                <button id="btn-save-playlist-toggle" class="btn btn-secondary btn-sm" title="Сохранить текущий трек и очередь в личный плейлист">💾 Сохранить</button>
+                <button id="btn-clear-queue" class="btn btn-ghost btn-sm">🗑️ Очистить</button>
+              </div>
             </div>
+            <form id="save-playlist-form" class="save-playlist-bar hidden">
+              <input
+                type="text"
+                id="save-playlist-name"
+                placeholder="Название плейлиста (например: Для катки)..."
+                maxlength="60"
+                autocomplete="off"
+                required
+              />
+              <button type="submit" id="btn-save-playlist-submit" class="btn btn-primary btn-sm">Сохранить</button>
+              <button type="button" id="btn-save-playlist-cancel" class="btn btn-ghost btn-sm">✕</button>
+            </form>
             <div id="queue-list" class="queue-list">
               <div class="empty-state small">Очередь пуста</div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== ВКЛАДКА 2: ЛИЧНЫЕ ПЛЕЙЛИСТЫ ==================== -->
+      <section id="tab-playlists" class="tab-panel">
+        <div class="card">
+          <div class="card-header-row">
+            <h2>💾 Мои сохранённые плейлисты</h2>
+          </div>
+          <p class="muted small" style="margin-bottom: 14px;">
+            Плейлисты привязаны лично к вашему Discord-аккаунту. При восстановлении текущая очередь вашего голосового канала полностью стирается и заменяется треками из выбранного плейлиста. Также работают команды <code>/playlist</code> и <code>+pl</code>.
+          </p>
+          <form id="playlists-save-form" class="play-form" style="margin-bottom: 18px;">
+            <input
+              type="text"
+              id="playlists-save-name"
+              placeholder="Сохранить текущую очередь под названием..."
+              maxlength="60"
+              autocomplete="off"
+              required
+            />
+            <button type="submit" id="btn-playlists-save-submit" class="btn btn-primary">💾 Сохранить текущую очередь</button>
+          </form>
+          <div id="playlists-list" class="playlists-grid">
+            <div class="empty-state small">Загрузка плейлистов...</div>
           </div>
         </div>
       </section>
@@ -243,7 +285,7 @@
         </div>
       </section>
 
-      <!-- ==================== ВКЛАДКА 4: НАСТРОЙКИ РОЛЕЙ (АДМИН) ==================== -->
+      <!-- ==================== ВКЛАДКА 4: НАСТРОЙКИ (АДМИН) ==================== -->
       <section id="tab-admin" class="tab-panel">
         <div class="card admin-card">
           <h2>⚙️ Права доступа к веб-панели</h2>
@@ -255,6 +297,36 @@
             </select>
             <button type="submit" class="btn btn-primary">💾 Сохранить настройки</button>
           </form>
+        </div>
+
+        <div class="card admin-card">
+          <h2>🍪 YouTube Cookies (горячее обновление)</h2>
+          <p class="muted small" style="margin-bottom: 12px;">
+            Нужны на облачных серверах, если YouTube выдаёт ошибку <code>Sign in to confirm you're not a bot</code> или протухла старая сессия.
+            Экспортируйте <code>cookies.txt</code> в режиме Инкогнито со страницы <code>youtube.com/robots.txt</code> (и просто закройте вкладку без «Выйти»), затем загрузите его сюда — бот применит cookies мгновенно без перезапуска.
+          </p>
+
+          <div id="cookies-status" class="cookies-status">Загрузка статуса cookies...</div>
+
+          <div class="cookies-upload-row">
+            <label class="file-btn">
+              <span id="cookies-file-label">📄 Выбрать файл cookies.txt</span>
+              <input type="file" id="cookies-file" accept=".txt,text/plain" hidden />
+            </label>
+          </div>
+
+          <textarea
+            id="cookies-textarea"
+            class="cookies-textarea"
+            rows="6"
+            placeholder="Выберите файл cookies.txt выше или вставьте его содержимое сюда (формат Netscape HTTP Cookie File)..."
+          ></textarea>
+
+          <div class="btn-row">
+            <button type="button" id="btn-cookies-save" class="btn btn-primary">💾 Загрузить и применить</button>
+            <button type="button" id="btn-cookies-reload" class="btn btn-secondary">🔄 Перечитать с диска</button>
+            <button type="button" id="btn-cookies-clear" class="btn btn-danger">🗑️ Удалить cookies</button>
+          </div>
         </div>
       </section>
     </main>

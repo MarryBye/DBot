@@ -105,34 +105,58 @@ function cleanTrackQueryForFallback(title: string, author?: string): string {
   return cleanedTitle || title;
 }
 
-function loadYouTubeCookie(): string | undefined {
-  const cookieFilePath = path.join(dataDir, 'cookies.txt');
-  if (fs.existsSync(cookieFilePath)) {
-    const content = fs.readFileSync(cookieFilePath, 'utf-8').replace(/\r\n/g, '\n').trim();
+const COOKIE_FILE_PATH = path.join(dataDir, 'cookies.txt');
+
+export interface YouTubeCookiesStatus {
+  hasCookies: boolean;
+  source: 'file' | 'env' | 'none';
+  updatedAt: string | null;
+  lineCount: number;
+}
+
+function loadYouTubeCookie(): { cookie?: string; source: 'file' | 'env' | 'none' } {
+  if (fs.existsSync(COOKIE_FILE_PATH)) {
+    const content = fs.readFileSync(COOKIE_FILE_PATH, 'utf-8').replace(/\r\n/g, '\n').trim();
     if (content.length > 20) {
       console.log('🍪 [YouTube] Загружены cookies из data/cookies.txt');
-      return content;
+      return { cookie: content, source: 'file' };
     }
   }
 
   if (config.ytCookie && config.ytCookie.trim().length > 10) {
     console.log('🍪 [YouTube] Загружены cookies из YT_COOKIE (.env)');
-    return config.ytCookie.trim();
+    return { cookie: config.ytCookie.trim(), source: 'env' };
   }
 
-  return undefined;
+  return { cookie: undefined, source: 'none' };
 }
 
-const initialCookie = loadYouTubeCookie();
-// При наличии cookies ставим лёгкие клиенты с поддержкой cookies (Tv, WebEmbedded) первыми,
-// избегая тяжёлых PO-token BotGuard потоков на слабом CPU (Oracle E2.1.Micro)!
-const ytdl = new Ytdl({
-  ...(initialCookie ? { cookie: initialCookie } : {}),
-  clients: initialCookie
-    ? [YtdlClient.Tv, YtdlClient.WebEmbedded, YtdlClient.VisionOS, YtdlClient.Mweb]
-    : [YtdlClient.VisionOS, YtdlClient.WebEmbedded, YtdlClient.Tv],
-  timeoutMs: 12_000,
-});
+function createYtdlInstance(cookie?: string): Ytdl {
+  // При наличии cookies ставим лёгкие клиенты с поддержкой cookies (Tv, WebEmbedded) первыми,
+  // избегая тяжёлых PO-token BotGuard потоков на слабом CPU (Oracle E2.1.Micro)!
+  return new Ytdl({
+    ...(cookie ? { cookie } : {}),
+    clients: cookie
+      ? [YtdlClient.Tv, YtdlClient.WebEmbedded, YtdlClient.VisionOS, YtdlClient.Mweb]
+      : [YtdlClient.VisionOS, YtdlClient.WebEmbedded, YtdlClient.Tv],
+    timeoutMs: 12_000,
+  });
+}
+
+let activeCookieSource: 'file' | 'env' | 'none' = 'none';
+let ytdl: Ytdl;
+try {
+  const initialLoaded = loadYouTubeCookie();
+  ytdl = createYtdlInstance(initialLoaded.cookie);
+  activeCookieSource = initialLoaded.source;
+} catch (err: any) {
+  console.warn(
+    '⚠️ [YouTube] Не удалось применить сохранённые cookies при старте (запускаюсь без них):',
+    err?.message || err
+  );
+  ytdl = createYtdlInstance(undefined);
+  activeCookieSource = 'none';
+}
 
 // ========================================================
 // Внутренний клиент SoundCloud API v2 (без сторонних пакетов)
@@ -499,6 +523,82 @@ class SpotifyClient {
 }
 
 export class MusicResolver {
+  public static getCookiesStatus(): YouTubeCookiesStatus {
+    if (activeCookieSource === 'file' && fs.existsSync(COOKIE_FILE_PATH)) {
+      const stat = fs.statSync(COOKIE_FILE_PATH);
+      const raw = fs.readFileSync(COOKIE_FILE_PATH, 'utf-8');
+      const lineCount = raw
+        .split(/\r?\n/)
+        .filter((l) => l.trim() && !l.trim().startsWith('#')).length;
+      return {
+        hasCookies: true,
+        source: 'file',
+        updatedAt: stat.mtime.toISOString(),
+        lineCount,
+      };
+    }
+
+    if (activeCookieSource === 'env' && config.ytCookie.trim().length > 10) {
+      return {
+        hasCookies: true,
+        source: 'env',
+        updatedAt: null,
+        lineCount: 1,
+      };
+    }
+
+    return {
+      hasCookies: false,
+      source: 'none',
+      updatedAt: null,
+      lineCount: 0,
+    };
+  }
+
+  /**
+   * Сохраняет новые YouTube cookies в data/cookies.txt и горячо пересоздаёт Ytdl-инстанс без перезапуска бота!
+   */
+  public static updateCookies(rawContent: string): YouTubeCookiesStatus {
+    const normalized = rawContent.replace(/\r\n/g, '\n').trim();
+    if (normalized.length < 20) {
+      throw new Error('Файл cookies пустой или слишком короткий.');
+    }
+
+    // Сначала валидируем через Ytdl — если нет SAPISID / __Secure-3PAPISID, сразу вернёт понятную ошибку!
+    const nextYtdl = createYtdlInstance(normalized);
+
+    fs.writeFileSync(COOKIE_FILE_PATH, normalized + '\n', 'utf-8');
+    ytdl = nextYtdl;
+    activeCookieSource = 'file';
+    console.log('🍪 [YouTube] Новые cookies сохранены и применены на лету (data/cookies.txt)');
+    return this.getCookiesStatus();
+  }
+
+  /**
+   * Перечитывает cookies с диска (data/cookies.txt или YT_COOKIE) и обновляет Ytdl на лету.
+   */
+  public static reloadCookiesFromDisk(): YouTubeCookiesStatus {
+    const loaded = loadYouTubeCookie();
+    ytdl = createYtdlInstance(loaded.cookie);
+    activeCookieSource = loaded.source;
+    console.log(`🔄 [YouTube] Cookies перечитаны (источник: ${activeCookieSource})`);
+    return this.getCookiesStatus();
+  }
+
+  /**
+   * Удаляет data/cookies.txt и сбрасывает Ytdl на работу без cookies.
+   */
+  public static clearCookies(): YouTubeCookiesStatus {
+    if (fs.existsSync(COOKIE_FILE_PATH)) {
+      fs.unlinkSync(COOKIE_FILE_PATH);
+    }
+    const fallbackEnv = config.ytCookie.trim().length > 10 ? config.ytCookie.trim() : undefined;
+    ytdl = createYtdlInstance(fallbackEnv);
+    activeCookieSource = fallbackEnv ? 'env' : 'none';
+    console.log('🗑️ [YouTube] Файл data/cookies.txt удалён.');
+    return this.getCookiesStatus();
+  }
+
   public static async resolve(
     query: string,
     requestedBy: { id: string; tag: string },

@@ -15,6 +15,7 @@ import { command as nowplaying } from './nowplaying.js';
 import { command as volume } from './volume.js';
 import { command as loop } from './loop.js';
 import { command as shuffle } from './shuffle.js';
+import { command as playlist } from './playlist.js';
 import { command as sound } from './sound.js';
 import { command as web } from './web.js';
 import type { Command } from '../types.js';
@@ -30,6 +31,7 @@ export const commands: Command[] = [
   volume,
   loop,
   shuffle,
+  playlist,
   sound,
   web,
   workers,
@@ -51,6 +53,7 @@ commandMap.set('p', play);
 commandMap.set('s', skip);
 commandMap.set('q', queue);
 commandMap.set('vol', volume);
+commandMap.set('pl', playlist);
 commandMap.set('sfx', sound);
 commandMap.set('meme', sound);
 commandMap.set('panel', web);

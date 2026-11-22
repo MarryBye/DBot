@@ -6,6 +6,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { workerPool } from '../voice/index.js';
 import { MusicResolver, type PlatformOption } from '../voice/music-resolver.js';
+import { PlaylistService } from '../voice/playlists.js';
 import { MyInstantsClient, SoundboardService } from '../voice/soundboard.js';
 import {
   consumeMagicToken,
@@ -229,6 +230,17 @@ export function startWebServer(discordClient: Client): http.Server {
 
   workerPool.events.on('stateChanged', () => scheduleBroadcast('state'));
   workerPool.events.on('soundsChanged', () => scheduleBroadcast('sounds'));
+  workerPool.events.on('playlistsChanged', (userId?: string) => {
+    const payload = `event: playlists\ndata: ${JSON.stringify({ updatedAt: Date.now() })}\n\n`;
+    for (const c of sseClients) {
+      if (userId && c.userId !== userId) continue;
+      try {
+        c.res.write(payload);
+      } catch {
+        sseClients.delete(c);
+      }
+    }
+  });
 
   setInterval(() => {
     for (const c of sseClients) {
@@ -484,6 +496,80 @@ export function startWebServer(discordClient: Client): http.Server {
           return;
         }
 
+        // ---- Настройки администратора: YouTube Cookies (горячая загрузка и обновление) ----
+        if (pathname === '/api/admin/cookies' && method === 'GET') {
+          if (!ctx.isAdmin) {
+            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+            return;
+          }
+          sendJson(res, 200, MusicResolver.getCookiesStatus());
+          return;
+        }
+
+        if (pathname === '/api/admin/cookies' && method === 'POST') {
+          if (!ctx.isAdmin) {
+            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+            return;
+          }
+          const body = await readJsonBody<{ content?: string }>(req, 2 * 1024 * 1024);
+          const content = String(body.content || '');
+          try {
+            const status = MusicResolver.updateCookies(content);
+            sendJson(res, 200, { ok: true, status });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: err?.message || 'Некорректный формат cookies.txt.',
+            });
+          }
+          return;
+        }
+
+        if (pathname === '/api/admin/cookies/reload' && method === 'POST') {
+          if (!ctx.isAdmin) {
+            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+            return;
+          }
+          try {
+            const status = MusicResolver.reloadCookiesFromDisk();
+            sendJson(res, 200, { ok: true, status });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: err?.message || 'Не удалось перечитать cookies.txt с диска.',
+            });
+          }
+          return;
+        }
+
+        if (pathname === '/api/admin/cookies' && method === 'DELETE') {
+          if (!ctx.isAdmin) {
+            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+            return;
+          }
+          const status = MusicResolver.clearCookies();
+          sendJson(res, 200, { ok: true, status });
+          return;
+        }
+
+        // ---- Личные сохранённые плейлисты (просмотр и удаление доступны даже вне войса) ----
+        if (pathname === '/api/playlists' && method === 'GET') {
+          const playlists = await PlaylistService.listUserPlaylists(session.userId);
+          sendJson(res, 200, { playlists });
+          return;
+        }
+
+        const deletePlaylistMatch = pathname.match(/^\/api\/playlists\/(\d+)$/);
+        if (deletePlaylistMatch && method === 'DELETE') {
+          const id = Number(deletePlaylistMatch[1]);
+          const deleted = await PlaylistService.deletePlaylist(session.userId, id);
+          if (!deleted) {
+            sendJson(res, 404, { error: 'Плейлист не найден.' });
+            return;
+          }
+          workerPool.events.emit('playlistsChanged', session.userId);
+          sendJson(res, 200, { ok: true, deleted });
+          return;
+        }
+
         // ---- Саундборд ----
         if (pathname === '/api/soundboard/custom' && method === 'GET') {
           const list = await SoundboardService.listCustomSounds(activeGuildId);
@@ -719,11 +805,81 @@ export function startWebServer(discordClient: Client): http.Server {
           return;
         }
 
+        if (pathname === '/api/playlists/load' && method === 'POST') {
+          const body = await readJsonBody<{ id?: number }>(req);
+          const id = Number(body.id);
+          if (!Number.isFinite(id)) {
+            sendJson(res, 400, { error: 'Укажите корректный ID плейлиста.' });
+            return;
+          }
+
+          const playlist = await PlaylistService.getUserPlaylistById(session.userId, id);
+          if (!playlist) {
+            sendJson(res, 404, { error: 'Плейлист не найден.' });
+            return;
+          }
+          if (playlist.tracks.length === 0) {
+            sendJson(res, 400, { error: 'Плейлист пуст.' });
+            return;
+          }
+
+          let worker;
+          try {
+            worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+          } catch (err: any) {
+            sendJson(res, 409, { error: err.message });
+            return;
+          }
+
+          const tracks = PlaylistService.buildPlayableTracks(playlist, {
+            id: session.userId,
+            tag: ctx.displayName,
+          });
+          const result = await worker.queue.replaceQueue(tracks);
+          sendJson(res, 200, {
+            ok: true,
+            playlistName: playlist.name,
+            loadedCount: result.loadedCount,
+            firstTrack: result.firstTrack,
+          });
+          return;
+        }
+
         const worker = workerPool.getWorkerForChannel(userChannelId);
         if (!worker) {
           sendJson(res, 404, {
             error: 'В вашем голосовом канале сейчас нет агента. Сначала вызовите агента или включите трек.',
           });
+          return;
+        }
+
+        if (pathname === '/api/playlists/save' && method === 'POST') {
+          const body = await readJsonBody<{ name?: string }>(req);
+          const name = String(body.name || '').trim();
+          if (!name) {
+            sendJson(res, 400, { error: 'Введите название плейлиста.' });
+            return;
+          }
+          if (!worker.queue.currentTrack && worker.queue.tracks.length === 0) {
+            sendJson(res, 400, { error: 'Очередь пуста — нечего сохранять.' });
+            return;
+          }
+          try {
+            const saved = await PlaylistService.savePlaylist({
+              userId: session.userId,
+              name,
+              currentTrack: worker.queue.currentTrack,
+              upcomingTracks: worker.queue.tracks,
+            });
+            workerPool.events.emit('playlistsChanged', session.userId);
+            sendJson(res, 201, {
+              ok: true,
+              playlist: saved.playlist,
+              overwritten: saved.overwritten,
+            });
+          } catch (err: any) {
+            sendJson(res, 400, { error: err?.message || 'Не удалось сохранить плейлист.' });
+          }
           return;
         }
 
