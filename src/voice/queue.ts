@@ -63,13 +63,25 @@ export class AudioQueue {
       if (oldState.status !== newState.status) {
         console.log(`🎚️ [Player #${this.worker.id}] ${oldState.status} → ${newState.status}`);
       }
-      if (
-        newState.status === AudioPlayerStatus.Idle &&
-        !this.currentTrack &&
-        this.mixer.activeSfxNames.length === 0
-      ) {
-        this.startIdleTimer();
-        this.worker.notifyStateChange();
+      if (newState.status === AudioPlayerStatus.Idle) {
+        // Самовосстановление: если плеер неожиданно ушёл в Idle при ещё живом треке/меме,
+        // автоматически переподключаем выходной поток микшера!
+        if (this.worker.currentChannelId && this.mixer.hasActiveAudio && !this.isPaused) {
+          console.warn(
+            `🔄 [Player #${this.worker.id}] Неожиданный переход в Idle во время воспроизведения — восстанавливаю поток!`
+          );
+          setTimeout(() => {
+            if (this.worker.currentChannelId && this.mixer.hasActiveAudio && !this.isPaused) {
+              this.ensureMixerPlaying();
+            }
+          }, 50);
+          return;
+        }
+
+        if (!this.currentTrack && this.mixer.activeSfxNames.length === 0) {
+          this.startIdleTimer();
+          this.worker.notifyStateChange();
+        }
       }
     });
   }

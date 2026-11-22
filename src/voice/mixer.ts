@@ -6,7 +6,7 @@ const FRAME_MS = 20;
 const FRAME_BYTES = 3840; // 48000 Hz * 0.02s * 2 ch * 2 bytes (s16le)
 const SAMPLES_PER_FRAME = FRAME_BYTES / 2; // 1920 Int16 samples
 const MAX_BUFFER_BYTES = FRAME_BYTES * 64; // ~240 KB (~1.28s предбуфер на источник)
-const MAX_OUTPUT_QUEUE_BYTES = FRAME_BYTES * 2; // Максимум 40мс в выходном буфере
+const MAX_OUTPUT_QUEUE_BYTES = FRAME_BYTES * 6; // 120мс запас против джиттера CPU (мемы всё равно мгновенные!)
 
 const DUCK_TARGET_GAIN = 0.18; // Музыка приглушается до 18% во время мема
 const DUCK_DOWN_STEP = 0.14;   // Быстрое плавное приглушение (~120мс)
@@ -144,6 +144,10 @@ export class AudioMixer {
     return this.output !== null && !this.output.destroyed;
   }
 
+  public get hasActiveAudio(): boolean {
+    return (this.musicSource !== null && !this.musicSource.isFinished) || this.sfxSources.length > 0;
+  }
+
   public ensureResource(forceRecreate = false): { resource: AudioResource | null; created: boolean } {
     if (this.output && !this.output.destroyed && !forceRecreate) {
       return { resource: null, created: false };
@@ -151,11 +155,18 @@ export class AudioMixer {
 
     this.stopLoopAndCloseOutput();
 
-    this.output = new PassThrough({ highWaterMark: FRAME_BYTES * 4 });
+    this.output = new PassThrough({ highWaterMark: FRAME_BYTES * 12 });
     const resource = createAudioResource(this.output, {
       inputType: StreamType.Raw,
       inlineVolume: false,
     });
+
+    // Сразу прогреваем буфер 3 кадрами (60мс), чтобы AudioPlayer не голодал на холодном старте
+    for (let i = 0; i < 3; i++) {
+      if (this.output && !this.output.destroyed) {
+        this.processFrame();
+      }
+    }
 
     this.startLoop();
     return { resource, created: true };

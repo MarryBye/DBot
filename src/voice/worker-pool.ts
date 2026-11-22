@@ -85,6 +85,9 @@ export class VoiceWorker {
     this.player = createAudioPlayer({
       behaviors: {
         noSubscriber: NoSubscriberBehavior.Pause,
+        // По умолчанию 5 кадров (100мс) — на слабом vCPU (Oracle Micro) холодный старт
+        // легко даёт скачок на 120мс и сбрасывает плеер в idle. Ставим запас 5 секунд (250 кадров)!
+        maxMissedFrames: 250,
       },
     });
 
@@ -181,6 +184,8 @@ export class VoiceWorker {
       });
 
       await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      // Короткая пауза для стабилизации UDP/DAVE E2EE рукопожатия на первом подключении
+      await new Promise((r) => setTimeout(r, 200));
 
       // Запускаем оба предохранительных таймера по 5 минут:
       this.queue.startIdleTimer();
