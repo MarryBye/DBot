@@ -1,0 +1,849 @@
+import { Client } from 'discord.js';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import path from 'node:path';
+import { config } from '../config.js';
+import { workerPool } from '../voice/index.js';
+import { MusicResolver, type PlatformOption } from '../voice/music-resolver.js';
+import { MyInstantsClient, SoundboardService } from '../voice/soundboard.js';
+import {
+  consumeMagicToken,
+  createWebSession,
+  deleteWebSession,
+  getRequiredRoleId,
+  getWebSession,
+  resolveMemberContext,
+  setRequiredRoleId,
+  updateSessionActiveGuild,
+} from './auth.js';
+
+const COOKIE_NAME = 'dbot_session';
+const publicDir = path.resolve(process.cwd(), 'public');
+const oauthStates = new Map<string, number>();
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+};
+
+function parseCookies(req: IncomingMessage): Record<string, string> {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  const result: Record<string, string> = {};
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const val = decodeURIComponent(part.slice(idx + 1).trim());
+    result[key] = val;
+  }
+  return result;
+}
+
+function setSessionCookie(res: ServerResponse, token: string): void {
+  const maxAge = 7 * 24 * 60 * 60;
+  res.setHeader(
+    'Set-Cookie',
+    `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`
+  );
+}
+
+function clearSessionCookie(res: ServerResponse): void {
+  res.setHeader(
+    'Set-Cookie',
+    `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`
+  );
+}
+
+function sendJson(res: ServerResponse, statusCode: number, data: unknown): void {
+  const body = JSON.stringify(data);
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+function redirect(res: ServerResponse, location: string): void {
+  res.writeHead(302, { Location: location });
+  res.end();
+}
+
+async function readJsonBody<T = any>(
+  req: IncomingMessage,
+  maxBytes = 1024 * 1024
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error('Превышен максимальный размер запроса'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on('end', () => {
+      if (chunks.length === 0) {
+        resolve({} as T);
+        return;
+      }
+      try {
+        const text = Buffer.concat(chunks).toString('utf-8');
+        resolve(JSON.parse(text) as T);
+      } catch {
+        reject(new Error('Некорректный JSON в теле запроса'));
+      }
+    });
+
+    req.on('error', reject);
+  });
+}
+
+async function buildUserStatePayload(
+  client: Client,
+  userId: string,
+  preferredGuildId?: string | null
+) {
+  const ctx = await resolveMemberContext(client, userId, preferredGuildId);
+  const myWorker =
+    ctx.voice.inVoice && ctx.voice.channelId
+      ? workerPool.getWorkerForChannel(ctx.voice.channelId) ?? null
+      : null;
+
+  const poolStatuses = workerPool.getAllStatuses().map((w) => ({
+    ...w,
+    isMine: myWorker !== null && w.id === myWorker.id,
+  }));
+
+  const availableForGuild = ctx.guildId
+    ? workerPool.getAvailableCountForGuild(ctx.guildId)
+    : workerPool.availableCount;
+
+  return {
+    guildId: ctx.guildId,
+    guildName: ctx.guildName,
+    guilds: ctx.sharedGuilds,
+    user: {
+      id: userId,
+      username: ctx.member?.user.tag ?? ctx.displayName,
+      displayName: ctx.displayName,
+      avatarUrl: ctx.avatarUrl,
+      inGuild: ctx.inGuild,
+      isAdmin: ctx.isAdmin,
+      hasAccess: ctx.hasAccess,
+      requiredRoleId: ctx.requiredRoleId,
+      requiredRoleName: ctx.requiredRoleName,
+    },
+    voice: ctx.voice,
+    myWorker: myWorker
+      ? {
+          id: myWorker.id,
+          name: `Воркер #${myWorker.id}`,
+          tag: myWorker.client.user?.tag ?? `Worker #${myWorker.id}`,
+          avatarUrl: myWorker.client.user?.displayAvatarURL({ size: 64 }) ?? null,
+          channelId: myWorker.currentChannelId,
+          volume: myWorker.queue.volume,
+          loopMode: myWorker.queue.loopMode,
+          isPaused: myWorker.queue.isPaused,
+          progressSec: myWorker.queue.getPlaybackProgressSec(),
+          activeSfxName: myWorker.queue.activeSfxName,
+          idleLeaveAt: myWorker.queue.idleLeaveAt,
+          emptyLeaveAt: myWorker.emptyLeaveAt,
+          currentTrack: myWorker.queue.currentTrack,
+          queue: myWorker.queue.tracks,
+        }
+      : null,
+    pool: {
+      totalCount: workerPool.totalCount,
+      availableCount: availableForGuild,
+      workers: poolStatuses,
+    },
+  };
+}
+
+export function startWebServer(discordClient: Client): http.Server {
+  interface SseClient {
+    sessionToken: string;
+    userId: string;
+    res: ServerResponse;
+  }
+
+  const sseClients = new Set<SseClient>();
+  let broadcastTimer: NodeJS.Timeout | null = null;
+
+  const scheduleBroadcast = (eventType: 'state' | 'sounds') => {
+    if (eventType === 'sounds') {
+      const payload = `event: sounds\ndata: ${JSON.stringify({ updatedAt: Date.now() })}\n\n`;
+      for (const c of sseClients) {
+        try {
+          c.res.write(payload);
+        } catch {
+          sseClients.delete(c);
+        }
+      }
+      return;
+    }
+
+    if (broadcastTimer) return;
+    broadcastTimer = setTimeout(async () => {
+      broadcastTimer = null;
+      if (sseClients.size === 0) return;
+
+      const payloadBySession = new Map<string, string>();
+
+      for (const c of [...sseClients]) {
+        try {
+          let serialized = payloadBySession.get(c.sessionToken);
+          if (!serialized) {
+            const session = await getWebSession(c.sessionToken);
+            if (!session) {
+              sseClients.delete(c);
+              continue;
+            }
+            const state = await buildUserStatePayload(
+              discordClient,
+              c.userId,
+              session.activeGuildId
+            );
+            serialized = `event: state\ndata: ${JSON.stringify(state)}\n\n`;
+            payloadBySession.set(c.sessionToken, serialized);
+          }
+          c.res.write(serialized);
+        } catch {
+          sseClients.delete(c);
+        }
+      }
+    }, 80);
+  };
+
+  workerPool.events.on('stateChanged', () => scheduleBroadcast('state'));
+  workerPool.events.on('soundsChanged', () => scheduleBroadcast('sounds'));
+
+  setInterval(() => {
+    for (const c of sseClients) {
+      try {
+        c.res.write(': ping\n\n');
+      } catch {
+        sseClients.delete(c);
+      }
+    }
+  }, 25_000);
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      const pathname = url.pathname;
+      const method = req.method || 'GET';
+
+      // ====================================================
+      // 1. Публичные Auth маршруты
+      // ====================================================
+      if (pathname === '/api/auth/info' && method === 'GET') {
+        const cookies = parseCookies(req);
+        const session = await getWebSession(cookies[COOKIE_NAME]);
+        sendJson(res, 200, {
+          authenticated: Boolean(session),
+          oauthEnabled: Boolean(config.clientId && config.clientSecret),
+          prefix: config.prefix,
+        });
+        return;
+      }
+
+      if (pathname === '/api/auth/magic' && method === 'GET') {
+        const token = url.searchParams.get('token') || '';
+        const entry = consumeMagicToken(token);
+        if (!entry) {
+          redirect(res, '/?authError=expired');
+          return;
+        }
+        const session = await createWebSession({
+          userId: entry.userId,
+          username: entry.username,
+          avatar: entry.avatar,
+          activeGuildId: entry.guildId ?? null,
+        });
+        setSessionCookie(res, session.token);
+        redirect(res, '/');
+        return;
+      }
+
+      if (pathname === '/api/auth/discord' && method === 'GET') {
+        if (!config.clientId || !config.clientSecret) {
+          redirect(res, '/?authError=no_oauth');
+          return;
+        }
+        const state = crypto.randomBytes(16).toString('hex');
+        oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+
+        const redirectUri = `${config.publicUrl}/api/auth/callback`;
+        const params = new URLSearchParams({
+          client_id: config.clientId,
+          redirect_uri: redirectUri,
+          response_type: 'code',
+          scope: 'identify',
+          state,
+        });
+        redirect(res, `https://discord.com/oauth2/authorize?${params.toString()}`);
+        return;
+      }
+
+      if (pathname === '/api/auth/callback' && method === 'GET') {
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        if (!code || !state || !oauthStates.has(state)) {
+          redirect(res, '/?authError=invalid_state');
+          return;
+        }
+        oauthStates.delete(state);
+
+        const redirectUri = `${config.publicUrl}/api/auth/callback`;
+        const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: redirectUri,
+          }),
+        });
+
+        if (!tokenRes.ok) {
+          redirect(res, '/?authError=oauth_failed');
+          return;
+        }
+
+        const tokenData = (await tokenRes.json()) as { access_token: string };
+        const userRes = await fetch('https://discord.com/api/users/@me', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` },
+        });
+        if (!userRes.ok) {
+          redirect(res, '/?authError=user_fetch_failed');
+          return;
+        }
+
+        const user = (await userRes.json()) as {
+          id: string;
+          username: string;
+          global_name?: string;
+          avatar?: string;
+        };
+
+        const avatarUrl = user.avatar
+          ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
+          : null;
+
+        const session = await createWebSession({
+          userId: user.id,
+          username: user.global_name || user.username,
+          avatar: avatarUrl,
+        });
+
+        setSessionCookie(res, session.token);
+        redirect(res, '/');
+        return;
+      }
+
+      if (pathname === '/api/auth/logout' && method === 'POST') {
+        const cookies = parseCookies(req);
+        if (cookies[COOKIE_NAME]) {
+          await deleteWebSession(cookies[COOKIE_NAME]).catch(() => {});
+        }
+        clearSessionCookie(res);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // ====================================================
+      // 2. Защищённые API маршруты (требуют сессию)
+      // ====================================================
+      if (pathname.startsWith('/api/')) {
+        const cookies = parseCookies(req);
+        const session = await getWebSession(cookies[COOKIE_NAME]);
+        if (!session) {
+          sendJson(res, 401, { error: 'Требуется авторизация.' });
+          return;
+        }
+
+        const ctx = await resolveMemberContext(
+          discordClient,
+          session.userId,
+          session.activeGuildId
+        );
+
+        if (pathname === '/api/state' && method === 'GET') {
+          const payload = await buildUserStatePayload(
+            discordClient,
+            session.userId,
+            session.activeGuildId
+          );
+          sendJson(res, 200, payload);
+          return;
+        }
+
+        if (pathname === '/api/events' && method === 'GET') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+          });
+          res.write('\n');
+
+          const clientEntry: SseClient = {
+            sessionToken: session.token,
+            userId: session.userId,
+            res,
+          };
+          sseClients.add(clientEntry);
+
+          const initial = await buildUserStatePayload(
+            discordClient,
+            session.userId,
+            session.activeGuildId
+          );
+          res.write(`event: state\ndata: ${JSON.stringify(initial)}\n\n`);
+
+          req.on('close', () => {
+            sseClients.delete(clientEntry);
+          });
+          return;
+        }
+
+        // Переключение активного сервера (доступно любому авторизованному пользователю для своих серверов)
+        if (pathname === '/api/guild/select' && method === 'POST') {
+          const body = await readJsonBody<{ guildId?: string }>(req);
+          const targetGuildId = String(body.guildId || '').trim();
+          if (!ctx.sharedGuilds.some((g) => g.id === targetGuildId)) {
+            sendJson(res, 403, { error: 'Вы не состоите на выбранном сервере.' });
+            return;
+          }
+          await updateSessionActiveGuild(session.token, targetGuildId);
+          const nextPayload = await buildUserStatePayload(
+            discordClient,
+            session.userId,
+            targetGuildId
+          );
+          workerPool.events.emit('stateChanged');
+          sendJson(res, 200, nextPayload);
+          return;
+        }
+
+        if (!ctx.inGuild || !ctx.guildId) {
+          sendJson(res, 403, { error: 'У вас нет общих серверов с ботом.' });
+          return;
+        }
+        if (!ctx.hasAccess) {
+          sendJson(res, 403, {
+            error: `Недостаточно прав на сервере "${ctx.guildName}". Требуется роль: ${ctx.requiredRoleName ?? ctx.requiredRoleId}.`,
+          });
+          return;
+        }
+
+        const activeGuildId = ctx.guildId;
+
+        // ---- Настройки администратора (выбор роли доступа для активного сервера) ----
+        if (pathname === '/api/admin/settings' && method === 'GET') {
+          if (!ctx.isAdmin) {
+            sendJson(res, 403, { error: 'Только администраторы сервера могут изменять настройки.' });
+            return;
+          }
+          const guild = discordClient.guilds.cache.get(activeGuildId);
+          const roles = guild
+            ? [...guild.roles.cache.values()]
+                .filter((r) => r.id !== guild.id && !r.managed)
+                .sort((a, b) => b.position - a.position)
+                .map((r) => ({ id: r.id, name: r.name, color: r.hexColor }))
+            : [];
+          const requiredRoleId = await getRequiredRoleId(activeGuildId);
+          sendJson(res, 200, { requiredRoleId, roles });
+          return;
+        }
+
+        if (pathname === '/api/admin/settings' && method === 'POST') {
+          if (!ctx.isAdmin) {
+            sendJson(res, 403, { error: 'Только администраторы сервера могут изменять настройки.' });
+            return;
+          }
+          const body = await readJsonBody<{ requiredRoleId?: string | null }>(req);
+          const roleId = body.requiredRoleId ? String(body.requiredRoleId).trim() : null;
+          await setRequiredRoleId(activeGuildId, roleId || null);
+          workerPool.events.emit('stateChanged');
+          sendJson(res, 200, { ok: true, requiredRoleId: roleId || null });
+          return;
+        }
+
+        // ---- Саундборд ----
+        if (pathname === '/api/soundboard/custom' && method === 'GET') {
+          const list = await SoundboardService.listCustomSounds(activeGuildId);
+          sendJson(res, 200, { sounds: list });
+          return;
+        }
+
+        if (pathname === '/api/soundboard/memes' && method === 'GET') {
+          const q = (url.searchParams.get('q') || '').trim();
+          const region = url.searchParams.get('region') === 'us' ? 'us' : 'ru';
+          const items = q
+            ? await MyInstantsClient.search(q, 24)
+            : await MyInstantsClient.getTrending(region, 24);
+          sendJson(res, 200, { memes: items });
+          return;
+        }
+
+        if (pathname === '/api/soundboard/upload' && method === 'POST') {
+          const body = await readJsonBody<{
+            name?: string;
+            filename?: string;
+            mimeType?: string;
+            dataBase64?: string;
+            color?: string;
+            emoji?: string;
+          }>(req, 16 * 1024 * 1024);
+
+          if (!body.name || !body.dataBase64) {
+            sendJson(res, 400, { error: 'Укажите название звука и выберите аудиофайл.' });
+            return;
+          }
+
+          const rawBase64 = body.dataBase64.includes(',')
+            ? body.dataBase64.split(',')[1]
+            : body.dataBase64;
+          const buffer = Buffer.from(rawBase64, 'base64');
+
+          const saved = await SoundboardService.saveCustomSound({
+            guildId: activeGuildId,
+            name: body.name,
+            buffer,
+            originalFilename: body.filename || 'sound.mp3',
+            mimeType: body.mimeType,
+            color: body.color,
+            emoji: body.emoji,
+            uploadedById: session.userId,
+            uploadedByTag: ctx.displayName,
+          });
+
+          workerPool.events.emit('soundsChanged');
+          sendJson(res, 201, { sound: saved });
+          return;
+        }
+
+        if (pathname === '/api/soundboard/save-meme' && method === 'POST') {
+          const body = await readJsonBody<{
+            name?: string;
+            url?: string;
+            color?: string;
+            emoji?: string;
+          }>(req);
+
+          if (!body.name || !body.url) {
+            sendJson(res, 400, { error: 'Не указано имя или ссылка на мем-звук.' });
+            return;
+          }
+
+          const saved = await SoundboardService.saveSoundFromUrl({
+            guildId: activeGuildId,
+            name: body.name,
+            url: body.url,
+            color: body.color,
+            emoji: body.emoji || '😂',
+            uploadedById: session.userId,
+            uploadedByTag: ctx.displayName,
+          });
+
+          workerPool.events.emit('soundsChanged');
+          sendJson(res, 201, { sound: saved });
+          return;
+        }
+
+        const deleteSoundMatch = pathname.match(/^\/api\/soundboard\/custom\/(\d+)$/);
+        if (deleteSoundMatch && method === 'DELETE') {
+          const id = Number(deleteSoundMatch[1]);
+          const deleted = await SoundboardService.deleteCustomSound(activeGuildId, id);
+          if (!deleted) {
+            sendJson(res, 404, { error: 'Звук не найден.' });
+            return;
+          }
+          workerPool.events.emit('soundsChanged');
+          sendJson(res, 200, { ok: true, deleted });
+          return;
+        }
+
+        const soundFileMatch = pathname.match(/^\/api\/soundboard\/file\/(\d+)$/);
+        if (soundFileMatch && method === 'GET') {
+          const id = Number(soundFileMatch[1]);
+          const record = await SoundboardService.getCustomSoundById(activeGuildId, id);
+          if (!record) {
+            sendJson(res, 404, { error: 'Звук не найден.' });
+            return;
+          }
+          const filePath = SoundboardService.getSoundFilePath(record);
+          if (!fs.existsSync(filePath)) {
+            sendJson(res, 404, { error: 'Файл не найден на диске.' });
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': record.mimeType || 'audio/mpeg' });
+          fs.createReadStream(filePath).pipe(res);
+          return;
+        }
+
+        // ====================================================
+        // 3. Управление ботом и очередью — ТОЛЬКО если человек в голосовом канале!
+        // ====================================================
+        if (!ctx.voice.inVoice || !ctx.voice.channelId) {
+          sendJson(res, 403, {
+            error:
+              'Вы не находитесь в голосовом канале! Зайдите в любой голосовой канал на сервере, чтобы вызывать агента и управлять очередью.',
+          });
+          return;
+        }
+
+        const userChannelId = ctx.voice.channelId;
+
+        if (pathname === '/api/worker/summon' && method === 'POST') {
+          try {
+            const worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+            sendJson(res, 200, {
+              ok: true,
+              workerId: worker.id,
+              message: `Воркер #${worker.id} подключён к каналу ${ctx.voice.channelName}`,
+            });
+          } catch (err: any) {
+            sendJson(res, 409, { error: err.message });
+          }
+          return;
+        }
+
+        if (pathname === '/api/worker/leave' && method === 'POST') {
+          const worker = workerPool.getWorkerForChannel(userChannelId);
+          if (!worker) {
+            sendJson(res, 404, { error: 'В вашем канале нет активного агента.' });
+            return;
+          }
+          worker.queue.stop();
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (pathname === '/api/player/play' && method === 'POST') {
+          const body = await readJsonBody<{ query?: string; platform?: PlatformOption }>(req);
+          const query = (body.query || '').trim();
+          const platform: PlatformOption =
+            body.platform && ['auto', 'youtube', 'soundcloud', 'spotify'].includes(body.platform)
+              ? body.platform
+              : 'auto';
+
+          if (!query) {
+            sendJson(res, 400, { error: 'Введите название трека или вставьте ссылку.' });
+            return;
+          }
+
+          let worker;
+          try {
+            worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+          } catch (err: any) {
+            sendJson(res, 409, { error: err.message });
+            return;
+          }
+
+          const tracks = await MusicResolver.resolve(
+            query,
+            { id: session.userId, tag: ctx.displayName },
+            platform
+          );
+          if (tracks.length === 0) {
+            sendJson(res, 404, { error: 'Ничего не найдено по вашему запросу.' });
+            return;
+          }
+
+          const result = await worker.queue.add(tracks);
+          sendJson(res, 200, {
+            ok: true,
+            addedCount: result.addedCount,
+            isPlayingNow: result.isPlayingNow,
+            track: tracks[0],
+          });
+          return;
+        }
+
+        if (pathname === '/api/soundboard/play' && method === 'POST') {
+          const body = await readJsonBody<{
+            type?: 'custom' | 'url';
+            id?: number;
+            url?: string;
+            name?: string;
+          }>(req);
+
+          let worker;
+          try {
+            worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+          } catch (err: any) {
+            sendJson(res, 409, { error: err.message });
+            return;
+          }
+
+          if (body.type === 'custom' && body.id) {
+            const record = await SoundboardService.getCustomSoundById(activeGuildId, Number(body.id));
+            if (!record) {
+              sendJson(res, 404, { error: 'Звук не найден.' });
+              return;
+            }
+            await worker.queue.playSoundEffect({
+              name: record.name,
+              filePath: SoundboardService.getSoundFilePath(record),
+            });
+            sendJson(res, 200, { ok: true, played: record.name });
+            return;
+          }
+
+          if (body.type === 'url' && body.url) {
+            await worker.queue.playSoundEffect({
+              name: body.name || 'Мем',
+              url: body.url,
+            });
+            sendJson(res, 200, { ok: true, played: body.name || 'Мем' });
+            return;
+          }
+
+          sendJson(res, 400, { error: 'Неверные параметры воспроизведения звука.' });
+          return;
+        }
+
+        const worker = workerPool.getWorkerForChannel(userChannelId);
+        if (!worker) {
+          sendJson(res, 404, {
+            error: 'В вашем голосовом канале сейчас нет агента. Сначала вызовите агента или включите трек.',
+          });
+          return;
+        }
+
+        if (pathname === '/api/player/pause' && method === 'POST') {
+          worker.queue.pause();
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (pathname === '/api/player/resume' && method === 'POST') {
+          worker.queue.resume();
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (pathname === '/api/player/skip' && method === 'POST') {
+          const body = await readJsonBody<{ count?: number }>(req);
+          worker.queue.skip(Math.max(1, Number(body.count) || 1));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (pathname === '/api/player/stop' && method === 'POST') {
+          worker.queue.stop();
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (pathname === '/api/player/shuffle' && method === 'POST') {
+          worker.queue.shuffle();
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (pathname === '/api/player/volume' && method === 'POST') {
+          const body = await readJsonBody<{ volume?: number }>(req);
+          const vol = Number(body.volume);
+          if (!Number.isFinite(vol)) {
+            sendJson(res, 400, { error: 'Укажите громкость от 1 до 100.' });
+            return;
+          }
+          const updated = worker.queue.setVolume(vol);
+          sendJson(res, 200, { ok: true, volume: updated });
+          return;
+        }
+
+        if (pathname === '/api/player/loop' && method === 'POST') {
+          const body = await readJsonBody<{ mode?: 'off' | 'track' | 'queue' }>(req);
+          if (!body.mode || !['off', 'track', 'queue'].includes(body.mode)) {
+            sendJson(res, 400, { error: 'Некорректный режим loop.' });
+            return;
+          }
+          worker.queue.setLoop(body.mode);
+          sendJson(res, 200, { ok: true, mode: body.mode });
+          return;
+        }
+
+        if (pathname === '/api/queue/remove' && method === 'POST') {
+          const body = await readJsonBody<{ index?: number }>(req);
+          const removed = worker.queue.removeAt(Number(body.index));
+          if (!removed) {
+            sendJson(res, 404, { error: 'Трек с таким индексом не найден.' });
+            return;
+          }
+          sendJson(res, 200, { ok: true, removed });
+          return;
+        }
+
+        if (pathname === '/api/queue/move' && method === 'POST') {
+          const body = await readJsonBody<{ from?: number; to?: number }>(req);
+          const moved = worker.queue.move(Number(body.from), Number(body.to));
+          sendJson(res, moved ? 200 : 400, { ok: moved });
+          return;
+        }
+
+        if (pathname === '/api/queue/clear' && method === 'POST') {
+          const cleared = worker.queue.clearUpcoming();
+          sendJson(res, 200, { ok: true, cleared });
+          return;
+        }
+
+        sendJson(res, 404, { error: 'API endpoint не найден.' });
+        return;
+      }
+
+      // ====================================================
+      // 4. Раздача статических файлов веб-приложения (public/)
+      // ====================================================
+      const requestedPath = pathname === '/' ? '/index.html' : pathname;
+      const resolvedFile = path.resolve(publicDir, `.${requestedPath}`);
+
+      if (!resolvedFile.startsWith(publicDir) || !fs.existsSync(resolvedFile) || fs.statSync(resolvedFile).isDirectory()) {
+        const fallback = path.join(publicDir, 'index.html');
+        if (fs.existsSync(fallback)) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          fs.createReadStream(fallback).pipe(res);
+          return;
+        }
+        res.writeHead(404);
+        res.end('Not Found');
+        return;
+      }
+
+      const ext = path.extname(resolvedFile).toLowerCase();
+      res.writeHead(200, {
+        'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+        'Cache-Control': 'no-cache',
+      });
+      fs.createReadStream(resolvedFile).pipe(res);
+    } catch (err: any) {
+      console.error('❌ [WebServer] Ошибка обработки запроса:', err);
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: err?.message || 'Внутренняя ошибка сервера.' });
+      }
+    }
+  });
+
+  server.listen(config.port, config.host, () => {
+    console.log(`🌐 Веб-панель запущена: ${config.publicUrl} (слушает ${config.host}:${config.port})`);
+  });
+
+  return server;
+}
