@@ -18,7 +18,18 @@ export const command: Command = {
       return;
     }
 
+    const guildId = worker.currentGuildId;
+    const channelId = worker.currentChannelId;
     worker.queue.stop();
+    if (guildId && channelId) {
+      workerPool.emitActivity({
+        guildId,
+        channelId,
+        action: 'stop',
+        actorId: interaction.user.id,
+        actorName: member.displayName || interaction.user.username,
+      });
+    }
     await interaction.reply(`⏹️ Воспроизведение остановлено, очередь очищена. **Воркер #${worker.id}** отключен.`);
   },
   async executePrefix(message) {
@@ -29,7 +40,18 @@ export const command: Command = {
       return;
     }
 
+    const guildId = worker.currentGuildId;
+    const channelId = worker.currentChannelId;
     worker.queue.stop();
+    if (guildId && channelId) {
+      workerPool.emitActivity({
+        guildId,
+        channelId,
+        action: 'stop',
+        actorId: message.author.id,
+        actorName: message.member?.displayName || message.author.username,
+      });
+    }
     await message.reply(`⏹️ Воспроизведение остановлено, очередь очищена. **Воркер #${worker.id}** отключен.`);
   },
 };

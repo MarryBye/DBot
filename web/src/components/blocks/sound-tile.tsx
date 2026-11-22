@@ -9,6 +9,7 @@ export interface SoundTileProps {
   color: string;
   icon: IconName;
   inVoice: boolean;
+  isBusy?: boolean;
   secondaryActionIcon: IconName;
   secondaryActionLabel: string;
   secondaryActionDestructive?: boolean;
@@ -25,6 +26,7 @@ export function SoundTile({
   color,
   icon,
   inVoice,
+  isBusy = false,
   secondaryActionIcon,
   secondaryActionLabel,
   secondaryActionDestructive = false,
@@ -43,7 +45,7 @@ export function SoundTile({
     >
       <button
         type="button"
-        disabled={!inVoice}
+        disabled={!inVoice || isBusy}
         onClick={onPlay}
         title={inVoice ? t('soundboard.playInVoice') : t('soundboard.joinVoiceFirst')}
         className="flex flex-1 flex-col items-start gap-2.5 p-3.5 text-left transition-colors hover:bg-subtle/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus disabled:cursor-not-allowed disabled:opacity-55"

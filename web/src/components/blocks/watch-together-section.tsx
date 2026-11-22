@@ -121,7 +121,7 @@ export function WatchTogetherSection({
 
   const embedSrc =
     videoId && isWatchingVideo
-      ? `${YOUTUBE_EMBED_ORIGIN}/embed/${videoId}?start=${embedStartSec}&autoplay=1&mute=1&rel=0&modestbranding=1&enablejsapi=1`
+      ? `${YOUTUBE_EMBED_ORIGIN}/embed/${videoId}?start=${embedStartSec}&autoplay=1&mute=1&rel=0&enablejsapi=1`
       : null;
 
   return (
@@ -210,19 +210,20 @@ export function WatchTogetherSection({
                       <Badge variant="warning">{t('agents.pausedBadge')}</Badge>
                     )}
                   </div>
-                  <div className="truncate text-base font-semibold text-fg-primary">
+                  <div className="min-w-0 text-base font-semibold text-fg-primary">
                     {safeLink ? (
                       <a
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex max-w-full items-center gap-1.5 hover:text-accent hover:underline"
+                        title={track.title || track.originalUrl}
+                        className="flex w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
                       >
-                        <span className="truncate">{track.title}</span>
+                        <span className="min-w-0 truncate">{track.title || track.originalUrl}</span>
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (
-                      track.title
+                      <span className="block truncate">{track.title || track.originalUrl}</span>
                     )}
                   </div>
                   {track.author && (
@@ -275,19 +276,20 @@ export function WatchTogetherSection({
                 </div>
 
                 <div className="space-y-1">
-                  <div className="text-lg font-semibold leading-snug text-fg-primary">
+                  <div className="min-w-0 text-lg font-semibold leading-snug text-fg-primary">
                     {safeLink ? (
                       <a
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex max-w-full items-center gap-1.5 hover:text-accent hover:underline"
+                        title={track.title || track.originalUrl}
+                        className="flex w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
                       >
-                        <span className="truncate">{track.title}</span>
+                        <span className="min-w-0 truncate">{track.title || track.originalUrl}</span>
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (
-                      track.title
+                      <span className="block truncate">{track.title || track.originalUrl}</span>
                     )}
                   </div>
                   {track.author && (

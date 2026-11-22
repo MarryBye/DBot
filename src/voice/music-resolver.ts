@@ -1058,6 +1058,40 @@ export class MusicResolver {
     ];
   }
 
+  private static async fetchYouTubeOEmbed(url: string): Promise<{
+    title: string;
+    author: string;
+    thumbnail: string | null;
+  } | null> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5_000);
+      try {
+        const res = await fetch(
+          `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) return null;
+        const oe = (await res.json()) as {
+          title?: string;
+          author_name?: string;
+          thumbnail_url?: string;
+        };
+        const title = String(oe.title || '').trim();
+        if (!title) return null;
+        return {
+          title,
+          author: String(oe.author_name || '').trim(),
+          thumbnail: oe.thumbnail_url ?? null,
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      return null;
+    }
+  }
+
   private static async resolveYouTubeUrl(
     url: string,
     requestedBy: { id: string; tag: string }
@@ -1083,7 +1117,8 @@ export class MusicResolver {
           const isYtMusicUrl = parsedUrl?.hostname.toLowerCase() === 'music.youtube.com';
           return items.slice(0, MAX_PLAYLIST_IMPORT).map((item: any) => {
             const durationSec = Number(item.lengthSeconds ?? 0);
-            const authorName = item.author?.name ?? 'YouTube';
+            const authorName = String(item.author?.name ?? '').trim() || 'YouTube';
+            const rawTitle = String(item.title ?? '').trim();
             const isMusicTrack = isYtMusicUrl || authorName.endsWith(' - Topic');
             const mediaKind: TrackMediaKind = item.isLive
               ? 'stream'
@@ -1093,13 +1128,13 @@ export class MusicResolver {
             return {
               uid: makeUid(),
               id: item.id,
-              title: item.title || 'YouTube Video',
+              title: rawTitle || `YouTube (${item.id || 'Video'})`,
               author: authorName.replace(/ - Topic$/, ''),
               url: item.url,
               originalUrl: item.url,
               durationSec,
               durationFormatted: formatDuration(durationSec),
-              thumbnail: item.thumbnails?.[0]?.url ?? null,
+              thumbnail: item.thumbnails?.[0]?.url ?? (item.id ? `https://i.ytimg.com/vi/${item.id}/hqdefault.jpg` : null),
               source: 'youtube',
               mediaKind,
               streamKind: 'youtube',
@@ -1118,9 +1153,27 @@ export class MusicResolver {
       const info = await ytdl.getInfo(url);
       const details = info.videoDetails;
       const durationSec = Number(details.lengthSeconds ?? 0);
-      const authorName = details.author?.name ?? 'YouTube';
+      let title = String(details.title ?? '').trim();
+      let authorName = String(details.author?.name ?? '').trim();
+      let thumbnail: string | null = details.thumbnails?.[0]?.url ?? null;
+
+      // Клиенты Tv/WebEmbedded иногда возвращают пустой title/author — добираем метаданные через oEmbed!
+      if (!title || !authorName || !thumbnail) {
+        const canonicalUrl = details.id ? `https://www.youtube.com/watch?v=${details.id}` : url;
+        const oe = await this.fetchYouTubeOEmbed(canonicalUrl);
+        if (oe) {
+          if (!title) title = oe.title;
+          if (!authorName) authorName = oe.author;
+          if (!thumbnail) thumbnail = oe.thumbnail;
+        }
+      }
+
+      const finalAuthor = authorName || 'YouTube';
+      const finalTitle = title || (details.id ? `YouTube (${details.id})` : 'YouTube Video');
+      const finalThumb =
+        thumbnail || (details.id ? `https://i.ytimg.com/vi/${details.id}/hqdefault.jpg` : null);
       const isLive = Boolean((details as any).isLiveContent || (details as any).isLive);
-      const isMusicTrack = isYtMusicHost || authorName.endsWith(' - Topic');
+      const isMusicTrack = isYtMusicHost || finalAuthor.endsWith(' - Topic');
       const mediaKind: TrackMediaKind = isLive
         ? 'stream'
         : isMusicTrack
@@ -1131,13 +1184,13 @@ export class MusicResolver {
         {
           uid: makeUid(),
           id: details.id,
-          title: details.title,
-          author: authorName.replace(/ - Topic$/, ''),
+          title: finalTitle,
+          author: finalAuthor.replace(/ - Topic$/, ''),
           url: details.url || url,
           originalUrl: url,
           durationSec,
           durationFormatted: formatDuration(durationSec),
-          thumbnail: details.thumbnails?.[0]?.url ?? null,
+          thumbnail: finalThumb,
           source: 'youtube',
           mediaKind,
           streamKind: 'youtube',
@@ -1146,18 +1199,11 @@ export class MusicResolver {
       ];
     } catch (ytErr) {
       console.warn('⚠️ YouTube getInfo заблокирован, беру метаданные через oEmbed:', ytErr);
-      const oeRes = await fetch(
-        `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`
-      );
-      if (!oeRes.ok) {
+      const oe = await this.fetchYouTubeOEmbed(url);
+      if (!oe) {
         throw new Error('Не удалось получить информацию о видео YouTube.');
       }
-      const oe = (await oeRes.json()) as {
-        title: string;
-        author_name?: string;
-        thumbnail_url?: string;
-      };
-      const authorName = oe.author_name ?? 'YouTube';
+      const authorName = oe.author || 'YouTube';
       const isMusicTrack = isYtMusicHost || authorName.endsWith(' - Topic');
       return [
         {
@@ -1167,10 +1213,10 @@ export class MusicResolver {
           author: authorName.replace(/ - Topic$/, ''),
           url,
           originalUrl: url,
-          searchQuery: cleanTrackQueryForFallback(oe.title, oe.author_name),
+          searchQuery: cleanTrackQueryForFallback(oe.title, oe.author),
           durationSec: 0,
           durationFormatted: '0:00',
-          thumbnail: oe.thumbnail_url ?? null,
+          thumbnail: oe.thumbnail,
           source: 'youtube',
           mediaKind: isMusicTrack ? 'music' : 'video',
           streamKind: 'youtube',
@@ -1191,10 +1237,23 @@ export class MusicResolver {
 
     const first = searchRes[0];
     const durationSec = Number(first.lengthSeconds ?? 0);
-    const authorName = first.author?.name ?? 'YouTube';
+    let title = String(first.title ?? '').trim();
+    let authorName = String(first.author?.name ?? '').trim();
+    let thumbnail: string | null = first.thumbnails?.[0]?.url ?? null;
+
+    if (!title || !authorName) {
+      const oe = await this.fetchYouTubeOEmbed(first.url);
+      if (oe) {
+        if (!title) title = oe.title;
+        if (!authorName) authorName = oe.author;
+        if (!thumbnail) thumbnail = oe.thumbnail;
+      }
+    }
+
+    const finalAuthor = authorName || 'YouTube';
     const mediaKind: TrackMediaKind = first.isLive
       ? 'stream'
-      : authorName.endsWith(' - Topic')
+      : finalAuthor.endsWith(' - Topic')
         ? 'music'
         : 'video';
 
@@ -1202,13 +1261,13 @@ export class MusicResolver {
       {
         uid: makeUid(),
         id: first.id,
-        title: first.title || query,
-        author: authorName.replace(/ - Topic$/, ''),
+        title: title || query,
+        author: finalAuthor.replace(/ - Topic$/, ''),
         url: first.url,
         originalUrl: first.url,
         durationSec,
         durationFormatted: formatDuration(durationSec),
-        thumbnail: first.thumbnails?.[0]?.url ?? null,
+        thumbnail: thumbnail || (first.id ? `https://i.ytimg.com/vi/${first.id}/hqdefault.jpg` : null),
         source: 'youtube',
         mediaKind,
         streamKind: 'youtube',
@@ -1400,28 +1459,31 @@ export class MusicResolver {
     };
 
     const countBefore = entry.items.length;
-    const ytTargetLimit = Math.min(30, page * 8);
+    const ytTargetLimit = Math.min(30, page * 6);
     const scOffset = Math.max(0, (page - 1) * 6);
     const spOffset = Math.max(0, (page - 1) * 6);
+
+    // Ограничиваем, сколько элементов с одного провайдера уходит в первую пачку, чтобы на 1-й странице
+    // всегда чередовались видео, музыка, плейлисты и разные платформы (а не 6 песен с одного провайдера).
+    const perProviderBurstCap = platform === 'auto' ? 2 : 3;
+    const overflowBuffer: SearchResultItem[] = [];
+
+    const pushProviderItems = (items: Array<SearchResultItem | null>) => {
+      let sent = 0;
+      for (const item of items) {
+        if (!item) continue;
+        if (sent < perProviderBurstCap) {
+          pushItem(item);
+          sent++;
+        } else {
+          overflowBuffer.push(item);
+        }
+      }
+    };
 
     const tasks: Array<Promise<void>> = [];
 
     if (platform === 'youtube' || platform === 'auto') {
-      tasks.push(
-        ytdl
-          .search(query, {
-            type: SearchType.Song,
-            limit: platform === 'youtube' ? ytTargetLimit : Math.min(18, page * 4),
-            signal,
-          })
-          .then((songs) => {
-            for (const s of songs) {
-              pushItem(this.mapYouTubeVideoToSearchItem(s, 'music'));
-            }
-          })
-          .catch(() => {})
-      );
-
       tasks.push(
         ytdl
           .search(query, {
@@ -1430,9 +1492,24 @@ export class MusicResolver {
             signal,
           })
           .then((videos) => {
-            for (const v of videos) {
-              pushItem(this.mapYouTubeVideoToSearchItem(v, 'video'));
-            }
+            pushProviderItems(
+              videos.map((v) => this.mapYouTubeVideoToSearchItem(v, 'video'))
+            );
+          })
+          .catch(() => {})
+      );
+
+      tasks.push(
+        ytdl
+          .search(query, {
+            type: SearchType.Song,
+            limit: platform === 'youtube' ? ytTargetLimit : Math.min(18, page * 4),
+            signal,
+          })
+          .then((songs) => {
+            pushProviderItems(
+              songs.map((s) => this.mapYouTubeVideoToSearchItem(s, 'music'))
+            );
           })
           .catch(() => {})
       );
@@ -1446,9 +1523,9 @@ export class MusicResolver {
               signal,
             })
             .then((playlists) => {
-              for (const pl of playlists) {
-                pushItem(this.mapYouTubePlaylistToSearchItem(pl));
-              }
+              pushProviderItems(
+                playlists.map((pl) => this.mapYouTubePlaylistToSearchItem(pl))
+              );
             })
             .catch(() => {})
         );
@@ -1464,9 +1541,9 @@ export class MusicResolver {
           signal
         )
           .then((tracks) => {
-            for (const t of tracks) {
-              pushItem(this.mapSoundCloudTrackToSearchItem(t));
-            }
+            pushProviderItems(
+              tracks.map((t) => this.mapSoundCloudTrackToSearchItem(t))
+            );
           })
           .catch(() => {})
       );
@@ -1480,9 +1557,9 @@ export class MusicResolver {
             signal
           )
             .then((playlists) => {
-              for (const pl of playlists) {
-                pushItem(this.mapSoundCloudPlaylistToSearchItem(pl));
-              }
+              pushProviderItems(
+                playlists.map((pl) => this.mapSoundCloudPlaylistToSearchItem(pl))
+              );
             })
             .catch(() => {})
         );
@@ -1498,9 +1575,7 @@ export class MusicResolver {
           signal
         )
           .then((items) => {
-            for (const item of items) {
-              pushItem(item);
-            }
+            pushProviderItems(items);
           })
           .catch(() => {})
       );
@@ -1508,6 +1583,11 @@ export class MusicResolver {
 
     await Promise.allSettled(tasks);
     if (signal?.aborted) return;
+
+    // Досыпаем оставшиеся результаты из всех провайдеров (для дозаполнения текущей и следующих страниц)
+    for (const item of overflowBuffer) {
+      pushItem(item);
+    }
 
     entry.fetchedPages = Math.max(entry.fetchedPages, page);
     const addedThisFetch = entry.items.length - countBefore;
@@ -1569,6 +1649,26 @@ export class MusicResolver {
 
       if (playableUrl) {
         const info = await ytdl.getInfo(playableUrl);
+
+        if (!track.title?.trim() || track.title.startsWith('YouTube (')) {
+          const liveTitle = String(info.videoDetails?.title || '').trim();
+          if (liveTitle) {
+            track.title = liveTitle;
+          } else {
+            const oe = await this.fetchYouTubeOEmbed(playableUrl);
+            if (oe?.title) track.title = oe.title;
+            if ((!track.author || track.author === 'YouTube') && oe?.author) {
+              track.author = oe.author;
+            }
+            if (!track.thumbnail && oe?.thumbnail) {
+              track.thumbnail = oe.thumbnail;
+            }
+          }
+        }
+        if (track.durationSec <= 0 && info.videoDetails?.lengthSeconds) {
+          track.durationSec = Number(info.videoDetails.lengthSeconds);
+          track.durationFormatted = formatDuration(track.durationSec);
+        }
 
         // Предпочитаем webm/opus (нативно потоковый контейнер без проблем с moov-атомом в pipe:0!)
         const hasWebmAudio = info.formats.some(

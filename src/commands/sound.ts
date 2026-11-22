@@ -209,6 +209,14 @@ export const command: Command = {
           name: found.name,
           filePath: SoundboardService.getSoundFilePath(found),
         });
+        workerPool.emitActivity({
+          guildId,
+          channelId: voiceChannel.id,
+          action: 'sfx',
+          actorId: interaction.user.id,
+          actorName: member.displayName || interaction.user.username,
+          detail: found.name,
+        });
         await interaction.editReply(
           `${found.emoji} Воспроизвожу звук **${found.name}** (Агент #${worker.id})`
         );
@@ -226,6 +234,14 @@ export const command: Command = {
         await worker.queue.playSoundEffect({
           name: best.name,
           url: best.url,
+        });
+        workerPool.emitActivity({
+          guildId,
+          channelId: voiceChannel.id,
+          action: 'sfx',
+          actorId: interaction.user.id,
+          actorName: member.displayName || interaction.user.username,
+          detail: best.name,
         });
         await interaction.editReply(
           `😂 Воспроизвожу мем **${best.name}** *(MyInstants • Агент #${worker.id})*`
@@ -265,6 +281,14 @@ export const command: Command = {
         }
         const best = results[0];
         await worker.queue.playSoundEffect({ name: best.name, url: best.url });
+        workerPool.emitActivity({
+          guildId,
+          channelId: voiceChannel.id,
+          action: 'sfx',
+          actorId: message.author.id,
+          actorName: message.member?.displayName || message.author.username,
+          detail: best.name,
+        });
         await statusMsg.edit(`😂 Воспроизвожу мем **${best.name}** *(MyInstants • Агент #${worker.id})*`);
       } catch (err: any) {
         await statusMsg.edit(err?.message || '❌ Не удалось воспроизвести мем.');
@@ -373,6 +397,14 @@ export const command: Command = {
           name: local.name,
           filePath: SoundboardService.getSoundFilePath(local),
         });
+        workerPool.emitActivity({
+          guildId,
+          channelId: voiceChannel.id,
+          action: 'sfx',
+          actorId: message.author.id,
+          actorName: message.member?.displayName || message.author.username,
+          detail: local.name,
+        });
         await message.reply(`${local.emoji} Воспроизвожу звук **${local.name}** (Агент #${worker.id})`);
         return;
       }
@@ -384,6 +416,14 @@ export const command: Command = {
       }
       const best = memes[0];
       await worker.queue.playSoundEffect({ name: best.name, url: best.url });
+      workerPool.emitActivity({
+        guildId,
+        channelId: voiceChannel.id,
+        action: 'sfx',
+        actorId: message.author.id,
+        actorName: message.member?.displayName || message.author.username,
+        detail: best.name,
+      });
       await message.reply(`😂 Воспроизвожу мем **${best.name}** *(MyInstants • Агент #${worker.id})*`);
     } catch (err: any) {
       await message.reply(err?.message || '❌ Не удалось воспроизвести звук.');

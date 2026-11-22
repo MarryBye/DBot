@@ -5,7 +5,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { config } from '../config.js';
 import { soundsDir } from '../db/index.js';
-import { workerPool } from '../voice/index.js';
+import { workerPool, type ChannelActivityEvent } from '../voice/index.js';
 import { MusicResolver, type PlatformOption, type Track } from '../voice/music-resolver.js';
 import { PlaylistService } from '../voice/playlists.js';
 import {
@@ -51,6 +51,22 @@ interface WatchPresenceEntry {
 
 const WATCH_PRESENCE_TTL_MS = 30 * 60 * 1000;
 const watchSessions = new Map<string, WatchPresenceEntry>();
+const recentSfxPlays = new Map<string, number>();
+
+function isDuplicateSfxRequest(key: string, windowMs = 1500): boolean {
+  const now = Date.now();
+  if (recentSfxPlays.size > 300) {
+    for (const [k, ts] of recentSfxPlays.entries()) {
+      if (now - ts > 10_000) recentSfxPlays.delete(k);
+    }
+  }
+  const prev = recentSfxPlays.get(key);
+  if (prev !== undefined && now - prev < windowMs) {
+    return true;
+  }
+  recentSfxPlays.set(key, now);
+  return false;
+}
 
 function serializePublicTrack(track: Track) {
   return {
@@ -423,6 +439,34 @@ export function startWebServer(discordClient: Client): http.Server {
       if (userId && c.userId !== userId) continue;
       try {
         c.res.write(payload);
+      } catch {
+        sseClients.delete(c);
+      }
+    }
+  });
+
+  // Адресная рассылка уведомлений о действиях (кто остановил, очистил очередь, пропустил и т.д.)
+  // СТРОГО только участникам этого голосового канала на этом сервере!
+  workerPool.events.on('activity', (event: ChannelActivityEvent) => {
+    const guild = discordClient.guilds.cache.get(event.guildId);
+    if (!guild) return;
+
+    const publicPayload = {
+      id: event.id,
+      action: event.action,
+      actorId: event.actorId,
+      actorName: event.actorName,
+      detail: event.detail,
+      count: event.count,
+      timestamp: event.timestamp,
+    };
+    const serialized = `event: activity\ndata: ${JSON.stringify(publicPayload)}\n\n`;
+
+    for (const c of [...sseClients]) {
+      const voiceState = guild.voiceStates.cache.get(c.userId);
+      if (!voiceState || voiceState.channelId !== event.channelId) continue;
+      try {
+        c.res.write(serialized);
       } catch {
         sseClients.delete(c);
       }
@@ -1173,6 +1217,13 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
           worker.queue.stop();
+          workerPool.emitActivity({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            action: 'leave',
+            actorId: session.userId,
+            actorName: ctx.displayName,
+          });
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -1241,15 +1292,29 @@ export function startWebServer(discordClient: Client): http.Server {
           }
 
           if (body.type === 'custom' && body.id) {
-            const record = await SoundboardService.getCustomSoundById(activeGuildId, Number(body.id));
+            const soundId = Number(body.id);
+            const record = await SoundboardService.getCustomSoundById(activeGuildId, soundId);
             if (!record) {
               sendJson(res, 404, { error: 'Звук не найден.' });
+              return;
+            }
+            const dedupeKey = `${userChannelId}:${session.userId}:custom:${soundId}`;
+            if (isDuplicateSfxRequest(dedupeKey)) {
+              sendJson(res, 200, { ok: true, played: record.name, deduplicated: true });
               return;
             }
             try {
               await worker.queue.playSoundEffect({
                 name: record.name,
                 filePath: SoundboardService.getSoundFilePath(record),
+              });
+              workerPool.emitActivity({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                action: 'sfx',
+                actorId: session.userId,
+                actorName: ctx.displayName,
+                detail: record.name,
               });
               sendJson(res, 200, { ok: true, played: record.name });
             } catch (err: any) {
@@ -1265,9 +1330,22 @@ export function startWebServer(discordClient: Client): http.Server {
             try {
               const safeMemeUrl = await assertTrustedMyInstantsAudioUrl(body.url);
               const safeName = String(body.name || 'Мем').slice(0, 80);
+              const dedupeKey = `${userChannelId}:${session.userId}:url:${safeMemeUrl.toString()}`;
+              if (isDuplicateSfxRequest(dedupeKey)) {
+                sendJson(res, 200, { ok: true, played: safeName, deduplicated: true });
+                return;
+              }
               await worker.queue.playSoundEffect({
                 name: safeName,
                 url: safeMemeUrl.toString(),
+              });
+              workerPool.emitActivity({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                action: 'sfx',
+                actorId: session.userId,
+                actorName: ctx.displayName,
+                detail: safeName,
               });
               sendJson(res, 200, { ok: true, played: safeName });
             } catch (err: any) {
@@ -1368,32 +1446,76 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/player/pause' && method === 'POST') {
-          worker.queue.pause();
+          if (worker.queue.pause()) {
+            workerPool.emitActivity({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              action: 'pause',
+              actorId: session.userId,
+              actorName: ctx.displayName,
+            });
+          }
           sendJson(res, 200, { ok: true });
           return;
         }
 
         if (pathname === '/api/player/resume' && method === 'POST') {
-          worker.queue.resume();
+          if (worker.queue.resume()) {
+            workerPool.emitActivity({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              action: 'resume',
+              actorId: session.userId,
+              actorName: ctx.displayName,
+            });
+          }
           sendJson(res, 200, { ok: true });
           return;
         }
 
         if (pathname === '/api/player/skip' && method === 'POST') {
           const body = await readJsonBody<{ count?: number }>(req);
-          worker.queue.skip(Math.max(1, Number(body.count) || 1));
+          const count = Math.max(1, Number(body.count) || 1);
+          const skipped = worker.queue.skip(count);
+          if (skipped) {
+            workerPool.emitActivity({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              action: 'skip',
+              actorId: session.userId,
+              actorName: ctx.displayName,
+              detail: skipped.title,
+              count,
+            });
+          }
           sendJson(res, 200, { ok: true });
           return;
         }
 
         if (pathname === '/api/player/stop' && method === 'POST') {
           worker.queue.stop();
+          workerPool.emitActivity({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            action: 'stop',
+            actorId: session.userId,
+            actorName: ctx.displayName,
+          });
           sendJson(res, 200, { ok: true });
           return;
         }
 
         if (pathname === '/api/player/shuffle' && method === 'POST') {
-          worker.queue.shuffle();
+          const count = worker.queue.shuffle();
+          if (count > 1) {
+            workerPool.emitActivity({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              action: 'shuffle',
+              actorId: session.userId,
+              actorName: ctx.displayName,
+            });
+          }
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -1417,6 +1539,14 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
           worker.queue.setLoop(body.mode);
+          workerPool.emitActivity({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            action: 'loop',
+            actorId: session.userId,
+            actorName: ctx.displayName,
+            detail: body.mode,
+          });
           sendJson(res, 200, { ok: true, mode: body.mode });
           return;
         }
@@ -1428,6 +1558,14 @@ export function startWebServer(discordClient: Client): http.Server {
             sendJson(res, 404, { error: 'Трек с таким индексом не найден.' });
             return;
           }
+          workerPool.emitActivity({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            action: 'remove_track',
+            actorId: session.userId,
+            actorName: ctx.displayName,
+            detail: removed.title,
+          });
           sendJson(res, 200, { ok: true, removed });
           return;
         }
@@ -1441,6 +1579,16 @@ export function startWebServer(discordClient: Client): http.Server {
 
         if (pathname === '/api/queue/clear' && method === 'POST') {
           const cleared = worker.queue.clearUpcoming();
+          if (cleared > 0) {
+            workerPool.emitActivity({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              action: 'clear_queue',
+              actorId: session.userId,
+              actorName: ctx.displayName,
+              count: cleared,
+            });
+          }
           sendJson(res, 200, { ok: true, cleared });
           return;
         }

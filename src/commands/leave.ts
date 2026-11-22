@@ -27,7 +27,18 @@ export const command: Command = {
       return;
     }
 
+    const guildId = worker.currentGuildId;
+    const channelId = worker.currentChannelId;
     worker.leave();
+    if (guildId && channelId) {
+      workerPool.emitActivity({
+        guildId,
+        channelId,
+        action: 'leave',
+        actorId: interaction.user.id,
+        actorName: member.displayName || interaction.user.username,
+      });
+    }
 
     await interaction.reply({
       content: `👋 **Воркер #${worker.id}** отключен от канала **${voiceChannel.name}** и освобожден в пул.`,
@@ -48,7 +59,18 @@ export const command: Command = {
       return;
     }
 
+    const guildId = worker.currentGuildId;
+    const channelId = worker.currentChannelId;
     worker.leave();
+    if (guildId && channelId) {
+      workerPool.emitActivity({
+        guildId,
+        channelId,
+        action: 'leave',
+        actorId: message.author.id,
+        actorName: member?.displayName || message.author.username,
+      });
+    }
 
     await message.reply(
       `👋 **Воркер #${worker.id}** отключен от канала **${voiceChannel.name}** и освобожден в пул.`

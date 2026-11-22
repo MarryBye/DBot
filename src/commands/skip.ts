@@ -27,6 +27,17 @@ export const command: Command = {
 
     const count = interaction.options.getInteger('count') ?? 1;
     const skipped = worker.queue.skip(count);
+    if (worker.currentGuildId && worker.currentChannelId) {
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'skip',
+        actorId: interaction.user.id,
+        actorName: member.displayName || interaction.user.username,
+        detail: skipped?.title,
+        count,
+      });
+    }
 
     await interaction.reply(
       `⏭️ Пропущен трек **"${skipped?.title ?? 'Текущий'}"** ${count > 1 ? `(${count} шт.)` : ''}`
@@ -44,6 +55,17 @@ export const command: Command = {
     const safeCount = isNaN(count) || count < 1 ? 1 : count;
 
     const skipped = worker.queue.skip(safeCount);
+    if (worker.currentGuildId && worker.currentChannelId) {
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'skip',
+        actorId: message.author.id,
+        actorName: message.member?.displayName || message.author.username,
+        detail: skipped?.title,
+        count: safeCount,
+      });
+    }
 
     await message.reply(
       `⏭️ Пропущен трек **"${skipped?.title ?? 'Текущий'}"** ${safeCount > 1 ? `(${safeCount} шт.)` : ''}`

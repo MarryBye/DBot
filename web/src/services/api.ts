@@ -1,6 +1,7 @@
 import type {
   AdminSettings,
   AuthInfo,
+  ChannelActivityEvent,
   CookiesStatus,
   CustomSound,
   DashboardState,
@@ -24,6 +25,7 @@ export interface SseHandlers {
   onState: (state: DashboardState) => void;
   onSounds: () => void;
   onPlaylists: () => void;
+  onActivity: (event: ChannelActivityEvent) => void;
 }
 
 export interface DashboardApiClient {
@@ -136,6 +138,14 @@ export function createHttpApiClient(): DashboardApiClient {
 
       es.addEventListener('playlists', () => {
         handlers.onPlaylists();
+      });
+
+      es.addEventListener('activity', (event) => {
+        try {
+          handlers.onActivity(JSON.parse((event as MessageEvent).data) as ChannelActivityEvent);
+        } catch {
+          // Ignore malformed event
+        }
       });
 
       return {

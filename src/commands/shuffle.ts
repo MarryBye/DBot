@@ -19,6 +19,15 @@ export const command: Command = {
     }
 
     const count = worker.queue.shuffle();
+    if (worker.currentGuildId && worker.currentChannelId) {
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'shuffle',
+        actorId: interaction.user.id,
+        actorName: member.displayName || interaction.user.username,
+      });
+    }
     await interaction.reply(`🔀 Очередь перемешана! (${count} треков).`);
   },
   async executePrefix(message) {
@@ -30,6 +39,15 @@ export const command: Command = {
     }
 
     const count = worker.queue.shuffle();
+    if (worker.currentGuildId && worker.currentChannelId) {
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'shuffle',
+        actorId: message.author.id,
+        actorName: message.member?.displayName || message.author.username,
+      });
+    }
     await message.reply(`🔀 Очередь перемешана! (${count} треков).`);
   },
 };

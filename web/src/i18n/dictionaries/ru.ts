@@ -194,6 +194,18 @@ export const ru: Dictionary = {
   'pagination.prev': 'Предыдущая страница',
   'pagination.next': 'Следующая страница',
 
+  'activity.stop': '{actor} остановил бота и очистил очередь',
+  'activity.leave': '{actor} отключил агента',
+  'activity.clear_queue': '{actor} очистил очередь ({count} тр.)',
+  'activity.skip': '{actor} пропустил «{title}»',
+  'activity.skipCount': '{actor} пропустил треков: {count}',
+  'activity.remove_track': '{actor} удалил из очереди «{title}»',
+  'activity.shuffle': '{actor} перемешал очередь',
+  'activity.pause': '{actor} поставил на паузу',
+  'activity.resume': '{actor} возобновил воспроизведение',
+  'activity.loop': '{actor} изменил повтор ({mode})',
+  'activity.sfx': '{actor} включил звук: {name}',
+
   'admin.navTitle': 'Настройки',
   'admin.navAccess': 'Права доступа',
   'admin.navCookies': 'YouTube cookies',

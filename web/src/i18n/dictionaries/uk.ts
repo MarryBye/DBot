@@ -194,6 +194,18 @@ export const uk: Dictionary = {
   'pagination.prev': 'Попередня сторінка',
   'pagination.next': 'Наступна сторінка',
 
+  'activity.stop': '{actor} зупинив бота та очистив чергу',
+  'activity.leave': '{actor} відключив агента',
+  'activity.clear_queue': '{actor} очистив чергу ({count} тр.)',
+  'activity.skip': '{actor} пропустив «{title}»',
+  'activity.skipCount': '{actor} пропустив треків: {count}',
+  'activity.remove_track': '{actor} видалив із черги «{title}»',
+  'activity.shuffle': '{actor} перемішав чергу',
+  'activity.pause': '{actor} поставив на паузу',
+  'activity.resume': '{actor} продовжив відтворення',
+  'activity.loop': '{actor} змінив повтор ({mode})',
+  'activity.sfx': '{actor} увімкнув звук: {name}',
+
   'admin.navTitle': 'Налаштування',
   'admin.navAccess': 'Права доступу',
   'admin.navCookies': 'YouTube cookies',

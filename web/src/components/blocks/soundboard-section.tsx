@@ -22,6 +22,7 @@ export interface SoundboardSectionProps {
   memeRegion: MemeRegion;
   isLoadingMemes: boolean;
   isUploading: boolean;
+  playingSoundKey: string | null;
   savingMemeUrl: string | null;
   t: TranslateFn;
   onSubTabChange: (tab: SoundboardTab) => void;
@@ -44,6 +45,7 @@ export function SoundboardSection({
   memeRegion,
   isLoadingMemes,
   isUploading,
+  playingSoundKey,
   savingMemeUrl,
   t,
   onSubTabChange,
@@ -118,6 +120,7 @@ export function SoundboardSection({
                   color={sound.color}
                   icon="volume-2"
                   inVoice={inVoice}
+                  isBusy={playingSoundKey === `custom:${sound.id}`}
                   secondaryActionIcon="trash"
                   secondaryActionLabel={t('soundboard.deleteSound')}
                   secondaryActionDestructive
@@ -224,6 +227,7 @@ export function SoundboardSection({
                   color={meme.color}
                   icon="sparkles"
                   inVoice={inVoice}
+                  isBusy={playingSoundKey === `meme:${meme.url}`}
                   secondaryActionIcon="bookmark"
                   secondaryActionLabel={t('soundboard.saveToCustom')}
                   secondaryActionDisabled={savingMemeUrl === meme.url}

@@ -13,6 +13,7 @@ import type {
   AdminSettings,
   AppTab,
   AuthInfo,
+  ChannelActivityEvent,
   CookiesStatus,
   CustomSound,
   DashboardState,
@@ -127,6 +128,7 @@ export function DashboardContainer() {
   const [memeRegion, setMemeRegion] = React.useState<MemeRegion>('ru');
   const [isLoadingMemes, setIsLoadingMemes] = React.useState(false);
   const [isUploadingSound, setIsUploadingSound] = React.useState(false);
+  const [playingSoundKey, setPlayingSoundKey] = React.useState<string | null>(null);
   const [savingMemeUrl, setSavingMemeUrl] = React.useState<string | null>(null);
 
   // Admin
@@ -152,14 +154,91 @@ export function DashboardContainer() {
     syncedAt: Date.now(),
   });
   const prevGuildIdRef = React.useRef<string | null>(null);
+  const tRef = React.useRef(t);
+  tRef.current = t;
 
-  const pushToast = React.useCallback((message: string, variant: ToastVariant = 'info') => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    setToasts((prev) => [...prev.slice(-4), { id, message, variant }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((item) => item.id !== id));
-    }, 4000);
+  const stopPreviewAudio = React.useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
   }, []);
+
+  const pushToast = React.useCallback(
+    (message: string, variant: ToastVariant = 'info', durationMs = 4000) => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setToasts((prev) => [...prev.slice(-4), { id, message, variant }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((item) => item.id !== id));
+      }, durationMs);
+    },
+    []
+  );
+
+  const handleChannelActivity = React.useCallback(
+    (event: ChannelActivityEvent) => {
+      const tr = tRef.current;
+      const actor = event.actorName || tr('player.unknownUser');
+
+      switch (event.action) {
+        case 'stop':
+          pushToast(tr('activity.stop', { actor }), 'danger', 6000);
+          break;
+        case 'leave':
+          pushToast(tr('activity.leave', { actor }), 'danger', 6000);
+          break;
+        case 'clear_queue':
+          pushToast(
+            tr('activity.clear_queue', { actor, count: event.count ?? 0 }),
+            'danger',
+            6000
+          );
+          break;
+        case 'skip':
+          if (event.count && event.count > 1) {
+            pushToast(tr('activity.skipCount', { actor, count: event.count }), 'warning', 5500);
+          } else {
+            pushToast(
+              tr('activity.skip', { actor, title: event.detail || '' }),
+              'warning',
+              5500
+            );
+          }
+          break;
+        case 'remove_track':
+          pushToast(
+            tr('activity.remove_track', { actor, title: event.detail || '' }),
+            'warning',
+            5500
+          );
+          break;
+        case 'shuffle':
+          pushToast(tr('activity.shuffle', { actor }), 'info', 5000);
+          break;
+        case 'pause':
+          pushToast(tr('activity.pause', { actor }), 'info', 5000);
+          break;
+        case 'resume':
+          pushToast(tr('activity.resume', { actor }), 'info', 5000);
+          break;
+        case 'loop': {
+          const modeText =
+            event.detail === 'track'
+              ? tr('player.loopTrack')
+              : event.detail === 'queue'
+                ? tr('player.loopQueue')
+                : tr('player.loopOff');
+          pushToast(tr('activity.loop', { actor, mode: modeText }), 'info', 5000);
+          break;
+        }
+        case 'sfx':
+          pushToast(tr('activity.sfx', { actor, name: event.detail || '' }), 'info', 4500);
+          break;
+      }
+    },
+    [pushToast]
+  );
 
   const dismissToast = React.useCallback((id: string) => {
     setToasts((prev) => prev.filter((item) => item.id !== id));
@@ -291,6 +370,7 @@ export function DashboardContainer() {
       onState: applyDashboardState,
       onSounds: loadCustomSounds,
       onPlaylists: loadPlaylists,
+      onActivity: handleChannelActivity,
     });
 
     loadCustomSounds();
@@ -299,7 +379,7 @@ export function DashboardContainer() {
     if (initialState.user.isAdmin) {
       loadAdminData(initialState.user.canManageCookies);
     }
-  }, [applyDashboardState, loadAdminData, loadCustomSounds, loadMemes, loadPlaylists]);
+  }, [applyDashboardState, handleChannelActivity, loadAdminData, loadCustomSounds, loadMemes, loadPlaylists]);
 
   // Initial bootstrap
   React.useEffect(() => {
@@ -333,8 +413,9 @@ export function DashboardContainer() {
       sseRef.current?.close();
       sseRef.current = null;
       searchAbortRef.current?.abort();
+      stopPreviewAudio();
     };
-  }, [connectSession]);
+  }, [connectSession, stopPreviewAudio]);
 
   // Watch Together presence sync (reports active while on "watch" tab in a voice channel)
   const isWatchPresenceActive =
@@ -582,7 +663,6 @@ export function DashboardContainer() {
   const handleShuffle = async () => {
     try {
       await apiClient.shuffle();
-      pushToast(t('player.toastShuffled'), 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     }
@@ -606,7 +686,6 @@ export function DashboardContainer() {
   const handleStop = async () => {
     try {
       await apiClient.stop();
-      pushToast(t('player.toastStopped'), 'info');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     }
@@ -646,7 +725,6 @@ export function DashboardContainer() {
   const handleClearQueue = async () => {
     try {
       await apiClient.clearQueue();
-      pushToast(t('queue.toastCleared'), 'info');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     }
@@ -778,11 +856,18 @@ export function DashboardContainer() {
   };
 
   const handlePlayCustomSound = async (sound: CustomSound) => {
+    const key = `custom:${sound.id}`;
+    if (playingSoundKey === key) return;
+    stopPreviewAudio();
+    setPlayingSoundKey(key);
     try {
-      const res = await apiClient.playCustomSound(sound.id);
-      pushToast(t('soundboard.toastPlayed', { name: res.played }), 'success');
+      await apiClient.playCustomSound(sound.id);
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setTimeout(() => {
+        setPlayingSoundKey((prev) => (prev === key ? null : prev));
+      }, 1000);
     }
   };
 
@@ -813,11 +898,18 @@ export function DashboardContainer() {
   };
 
   const handlePlayMeme = async (meme: MemeSound) => {
+    const key = `meme:${meme.url}`;
+    if (playingSoundKey === key) return;
+    stopPreviewAudio();
+    setPlayingSoundKey(key);
     try {
       await apiClient.playMeme(meme.url, meme.name);
-      pushToast(t('soundboard.toastPlayed', { name: meme.name }), 'success');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setTimeout(() => {
+        setPlayingSoundKey((prev) => (prev === key ? null : prev));
+      }, 1000);
     }
   };
 
@@ -839,6 +931,7 @@ export function DashboardContainer() {
     const tab = nextTab as AppTab;
     if (tab === 'admin' && !state?.user.isAdmin) return;
     handleCloseSearch();
+    stopPreviewAudio();
     setActiveTab(tab);
     if (tab === 'admin' && state?.user.isAdmin) {
       void loadAdminData(state.user.canManageCookies);
@@ -1116,6 +1209,7 @@ export function DashboardContainer() {
               memeRegion={memeRegion}
               isLoadingMemes={isLoadingMemes}
               isUploading={isUploadingSound}
+              playingSoundKey={playingSoundKey}
               savingMemeUrl={savingMemeUrl}
               t={t}
               onSubTabChange={setSoundboardTab}

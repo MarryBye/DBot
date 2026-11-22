@@ -1,5 +1,6 @@
 import type {
   AdminSettings,
+  ChannelActivityAction,
   CookiesStatus,
   CustomSound,
   DashboardState,
@@ -512,6 +513,23 @@ export function createMockApiClient(): DashboardApiClient {
     for (const h of listeners) h.onPlaylists();
   }
 
+  function emitActivity(
+    action: ChannelActivityAction,
+    detail?: string,
+    count?: number
+  ): void {
+    const payload = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      action,
+      actorId: '1',
+      actorName: 'Alex',
+      detail,
+      count,
+      timestamp: Date.now(),
+    };
+    for (const h of listeners) h.onActivity(payload);
+  }
+
   function resolveSource(platform: PlatformOption): TrackSource {
     if (platform === 'spotify' || platform === 'soundcloud' || platform === 'youtube') {
       return platform;
@@ -615,20 +633,24 @@ export function createMockApiClient(): DashboardApiClient {
     pause: async () => {
       isPaused = true;
       emitState();
+      emitActivity('pause');
     },
 
     resume: async () => {
       isPaused = false;
       emitState();
+      emitActivity('resume');
     },
 
     skip: async (count = 1) => {
+      const skippedTitle = currentTrack?.title;
       const idx = Math.max(0, count - 1);
       currentTrack = queue[idx] ?? null;
       queue = queue.slice(idx + 1);
       progressSec = 0;
       isPaused = false;
       emitState();
+      emitActivity('skip', skippedTitle, count);
     },
 
     shuffle: async () => {
@@ -639,11 +661,13 @@ export function createMockApiClient(): DashboardApiClient {
       }
       queue = copy;
       emitState();
+      emitActivity('shuffle');
     },
 
     setLoop: async (mode) => {
       loopMode = mode;
       emitState();
+      emitActivity('loop', mode);
     },
 
     stop: async () => {
@@ -653,6 +677,7 @@ export function createMockApiClient(): DashboardApiClient {
       isPaused = false;
       workerConnected = false;
       emitState();
+      emitActivity('stop');
     },
 
     setVolume: async (val) => {
@@ -670,13 +695,17 @@ export function createMockApiClient(): DashboardApiClient {
     },
 
     removeQueueItem: async (index) => {
+      const removed = queue[index];
       queue = queue.filter((_, i) => i !== index);
       emitState();
+      if (removed) emitActivity('remove_track', removed.title);
     },
 
     clearQueue: async () => {
+      const count = queue.length;
       queue = [];
       emitState();
+      if (count > 0) emitActivity('clear_queue', undefined, count);
     },
 
     listPlaylists: async () => [...playlists],
@@ -770,6 +799,7 @@ export function createMockApiClient(): DashboardApiClient {
         activeSfxName = null;
         emitState();
       }, 2500);
+      emitActivity('sfx', name);
       return { played: name };
     },
 
@@ -791,6 +821,7 @@ export function createMockApiClient(): DashboardApiClient {
         activeSfxName = null;
         emitState();
       }, 2500);
+      emitActivity('sfx', name);
       return { played: name };
     },
 

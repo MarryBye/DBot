@@ -22,6 +22,30 @@ import { AudioQueue } from './queue.js';
 
 export const EMPTY_CHANNEL_TIMEOUT_MS = 5 * 60 * 1000; // 5 минут без людей в канале
 
+export type ChannelActivityAction =
+  | 'stop'
+  | 'leave'
+  | 'clear_queue'
+  | 'skip'
+  | 'remove_track'
+  | 'shuffle'
+  | 'pause'
+  | 'resume'
+  | 'loop'
+  | 'sfx';
+
+export interface ChannelActivityEvent {
+  id: string;
+  guildId: string;
+  channelId: string;
+  action: ChannelActivityAction;
+  actorId: string;
+  actorName: string;
+  detail?: string;
+  count?: number;
+  timestamp: number;
+}
+
 export interface WorkerStatus {
   id: number;
   name: string;
@@ -470,6 +494,16 @@ export class VoiceWorkerPool {
       }
     }
     this.events.emit('stateChanged');
+  }
+
+  public emitActivity(event: Omit<ChannelActivityEvent, 'id' | 'timestamp'>): void {
+    if (!event.guildId || !event.channelId) return;
+    const payload: ChannelActivityEvent = {
+      ...event,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: Date.now(),
+    };
+    this.events.emit('activity', payload);
   }
 
   public getWorkerForMember(member: GuildMember | null | undefined): VoiceWorker | null {

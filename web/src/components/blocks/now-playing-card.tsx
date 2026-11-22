@@ -108,20 +108,21 @@ export function NowPlayingCard({
 
               <div className="min-w-0 flex-1 space-y-1.5">
                 <PlatformBadge source={track.source} />
-                <div>
+                <div className="min-w-0">
                   {safeLink ? (
                     <a
                       href={safeLink}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex max-w-full items-center gap-1.5 text-base font-semibold leading-snug text-fg-primary hover:text-accent hover:underline"
+                      title={track.title || track.originalUrl}
+                      className="flex w-full min-w-0 items-center gap-1.5 text-base font-semibold leading-snug text-fg-primary hover:text-accent hover:underline"
                     >
-                      <span className="truncate">{track.title}</span>
+                      <span className="min-w-0 truncate">{track.title || track.originalUrl}</span>
                       <Icon name="external-link" size="xs" className="text-fg-muted" />
                     </a>
                   ) : (
                     <div className="truncate text-base font-semibold leading-snug text-fg-primary">
-                      {track.title}
+                      {track.title || track.originalUrl}
                     </div>
                   )}
                 </div>

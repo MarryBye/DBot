@@ -192,6 +192,18 @@ export const en = {
   'pagination.prev': 'Previous page',
   'pagination.next': 'Next page',
 
+  'activity.stop': '{actor} stopped playback and disconnected the agent',
+  'activity.leave': '{actor} disconnected the agent',
+  'activity.clear_queue': '{actor} cleared the queue ({count} tracks)',
+  'activity.skip': '{actor} skipped "{title}"',
+  'activity.skipCount': '{actor} skipped {count} tracks',
+  'activity.remove_track': '{actor} removed "{title}" from the queue',
+  'activity.shuffle': '{actor} shuffled the queue',
+  'activity.pause': '{actor} paused playback',
+  'activity.resume': '{actor} resumed playback',
+  'activity.loop': '{actor} changed repeat mode ({mode})',
+  'activity.sfx': '{actor} played sound: {name}',
+
   'admin.navTitle': 'Settings',
   'admin.navAccess': 'Access permissions',
   'admin.navCookies': 'YouTube cookies',

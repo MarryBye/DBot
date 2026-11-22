@@ -27,6 +27,15 @@ export const command: Command = {
       return;
     }
 
+    if (worker.currentGuildId && worker.currentChannelId) {
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'resume',
+        actorId: interaction.user.id,
+        actorName: member.displayName || interaction.user.username,
+      });
+    }
     await interaction.reply(`▶️ Воспроизведение возобновлено воркером **#${worker.id}**.`);
   },
   async executePrefix(message) {
@@ -43,6 +52,15 @@ export const command: Command = {
       return;
     }
 
+    if (worker.currentGuildId && worker.currentChannelId) {
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'resume',
+        actorId: message.author.id,
+        actorName: message.member?.displayName || message.author.username,
+      });
+    }
     await message.reply(`▶️ Воспроизведение возобновлено воркером **#${worker.id}**.`);
   },
 };

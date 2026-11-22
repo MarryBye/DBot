@@ -9,6 +9,28 @@ export type SoundboardTab = 'custom' | 'memes';
 export type AdminSectionId = 'access' | 'cookies';
 export type ToastVariant = 'info' | 'success' | 'warning' | 'danger';
 
+export type ChannelActivityAction =
+  | 'stop'
+  | 'leave'
+  | 'clear_queue'
+  | 'skip'
+  | 'remove_track'
+  | 'shuffle'
+  | 'pause'
+  | 'resume'
+  | 'loop'
+  | 'sfx';
+
+export interface ChannelActivityEvent {
+  id: string;
+  action: ChannelActivityAction;
+  actorId: string;
+  actorName: string;
+  detail?: string;
+  count?: number;
+  timestamp: number;
+}
+
 export interface VoiceMemberInfo {
   id: string;
   displayName: string;
