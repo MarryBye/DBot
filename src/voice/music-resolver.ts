@@ -10,6 +10,10 @@ import {
   verifyPcmStream,
   type PcmDecoderHandle,
 } from './ffmpeg.js';
+import {
+  assertSafePublicHttpUrl,
+  sanitizeYouTubeCookies,
+} from '../web/security.js';
 
 export type PlatformOption = 'auto' | 'youtube' | 'soundcloud' | 'spotify';
 
@@ -116,6 +120,10 @@ export interface YouTubeCookiesStatus {
 
 function loadYouTubeCookie(): { cookie?: string; source: 'file' | 'env' | 'none' } {
   if (fs.existsSync(COOKIE_FILE_PATH)) {
+    const lstat = fs.lstatSync(COOKIE_FILE_PATH);
+    if (lstat.isSymbolicLink() || !lstat.isFile()) {
+      throw new Error('Файл data/cookies.txt не является обычным файлом (symlink запрещён).');
+    }
     const content = fs.readFileSync(COOKIE_FILE_PATH, 'utf-8').replace(/\r\n/g, '\n').trim();
     if (content.length > 20) {
       console.log('🍪 [YouTube] Загружены cookies из data/cookies.txt');
@@ -229,7 +237,11 @@ class SoundCloudClient {
   }
 
   public static async fetchMediaStreamUrl(transcodingUrl: string): Promise<string> {
-    const data = await this.apiGet(transcodingUrl);
+    const validated = await assertSafePublicHttpUrl(transcodingUrl, {
+      httpsOnly: true,
+      allowedHosts: ['api-v2.soundcloud.com', 'soundcloud.com', '*.soundcloud.com'],
+    });
+    const data = await this.apiGet(validated.toString());
     if (!data?.url) throw new Error('SoundCloud не вернул ссылку на аудиопоток');
     return data.url;
   }
@@ -557,46 +569,119 @@ export class MusicResolver {
 
   /**
    * Сохраняет новые YouTube cookies в data/cookies.txt и горячо пересоздаёт Ytdl-инстанс без перезапуска бота!
+   * Автоматически вырезает все посторонние домены, проверяет формат и пишет атомарно с правами 0600.
    */
-  public static updateCookies(rawContent: string): YouTubeCookiesStatus {
-    const normalized = rawContent.replace(/\r\n/g, '\n').trim();
-    if (normalized.length < 20) {
-      throw new Error('Файл cookies пустой или слишком короткий.');
+  public static updateCookies(
+    rawContent: string,
+    actorLabel = 'admin'
+  ): YouTubeCookiesStatus & { keptCount: number; strippedCount: number } {
+    const { sanitized, keptCount, strippedCount } = sanitizeYouTubeCookies(rawContent);
+
+    // Сначала валидируем через Ytdl — если нет SAPISID / __Secure-3PAPISID, существующий файл не затрётся!
+    const nextYtdl = createYtdlInstance(sanitized);
+
+    if (fs.existsSync(COOKIE_FILE_PATH)) {
+      const lstat = fs.lstatSync(COOKIE_FILE_PATH);
+      if (lstat.isSymbolicLink() || !lstat.isFile()) {
+        throw new Error('Целевой путь data/cookies.txt не является обычным файлом.');
+      }
     }
 
-    // Сначала валидируем через Ytdl — если нет SAPISID / __Secure-3PAPISID, сразу вернёт понятную ошибку!
-    const nextYtdl = createYtdlInstance(normalized);
+    const tmpPath = path.join(dataDir, `.cookies.tmp.${crypto.randomBytes(6).toString('hex')}`);
+    fs.writeFileSync(tmpPath, sanitized + '\n', { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(tmpPath, COOKIE_FILE_PATH);
+    if (process.platform !== 'win32') {
+      try {
+        fs.chmodSync(COOKIE_FILE_PATH, 0o600);
+      } catch {
+        // ignore
+      }
+    }
 
-    fs.writeFileSync(COOKIE_FILE_PATH, normalized + '\n', 'utf-8');
     ytdl = nextYtdl;
     activeCookieSource = 'file';
-    console.log('🍪 [YouTube] Новые cookies сохранены и применены на лету (data/cookies.txt)');
-    return this.getCookiesStatus();
+    console.log(
+      `🍪 [YouTube] Новые cookies применены на лету (кем: ${actorLabel}, оставлено youtube: ${keptCount}, отброшено посторонних: ${strippedCount})`
+    );
+    return {
+      ...this.getCookiesStatus(),
+      keptCount,
+      strippedCount,
+    };
   }
 
   /**
    * Перечитывает cookies с диска (data/cookies.txt или YT_COOKIE) и обновляет Ytdl на лету.
    */
-  public static reloadCookiesFromDisk(): YouTubeCookiesStatus {
+  public static reloadCookiesFromDisk(actorLabel = 'admin'): YouTubeCookiesStatus {
     const loaded = loadYouTubeCookie();
     ytdl = createYtdlInstance(loaded.cookie);
     activeCookieSource = loaded.source;
-    console.log(`🔄 [YouTube] Cookies перечитаны (источник: ${activeCookieSource})`);
+    console.log(
+      `🔄 [YouTube] Cookies перечитаны (кем: ${actorLabel}, источник: ${activeCookieSource})`
+    );
     return this.getCookiesStatus();
   }
 
   /**
    * Удаляет data/cookies.txt и сбрасывает Ytdl на работу без cookies.
    */
-  public static clearCookies(): YouTubeCookiesStatus {
+  public static clearCookies(actorLabel = 'admin'): YouTubeCookiesStatus {
     if (fs.existsSync(COOKIE_FILE_PATH)) {
+      const lstat = fs.lstatSync(COOKIE_FILE_PATH);
+      if (lstat.isSymbolicLink() || !lstat.isFile()) {
+        throw new Error('Целевой путь data/cookies.txt не является обычным файлом.');
+      }
       fs.unlinkSync(COOKIE_FILE_PATH);
     }
     const fallbackEnv = config.ytCookie.trim().length > 10 ? config.ytCookie.trim() : undefined;
     ytdl = createYtdlInstance(fallbackEnv);
     activeCookieSource = fallbackEnv ? 'env' : 'none';
-    console.log('🗑️ [YouTube] Файл data/cookies.txt удалён.');
+    console.log(`🗑️ [YouTube] Файл data/cookies.txt удалён (кем: ${actorLabel}).`);
     return this.getCookiesStatus();
+  }
+
+  private static parseSupportedUrl(rawUrl: string): {
+    platform: 'spotify' | 'soundcloud' | 'youtube';
+    normalizedUrl: string;
+  } | null {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return null;
+    }
+
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'open.spotify.com') {
+      return { platform: 'spotify', normalizedUrl: parsed.toString() };
+    }
+    if (
+      host === 'soundcloud.com' ||
+      host === 'www.soundcloud.com' ||
+      host === 'm.soundcloud.com' ||
+      host === 'on.soundcloud.com'
+    ) {
+      return { platform: 'soundcloud', normalizedUrl: parsed.toString() };
+    }
+    if (
+      host === 'youtube.com' ||
+      host === 'www.youtube.com' ||
+      host === 'm.youtube.com' ||
+      host === 'music.youtube.com' ||
+      host === 'youtu.be'
+    ) {
+      return { platform: 'youtube', normalizedUrl: parsed.toString() };
+    }
+
+    return null;
   }
 
   public static async resolve(
@@ -609,23 +694,20 @@ export class MusicResolver {
       throw new Error('Пустой запрос.');
     }
 
-    const isUrl = /^https?:\/\//i.test(trimmed);
+    const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
 
     if (isUrl) {
-      if (trimmed.includes('open.spotify.com/')) {
-        return SpotifyClient.resolveUrl(trimmed, requestedBy);
+      const supported = this.parseSupportedUrl(trimmed);
+      if (!supported) {
+        throw new Error('Неподдерживаемая ссылка. Разрешены только YouTube, Spotify и SoundCloud.');
       }
-      if (trimmed.includes('soundcloud.com/') || trimmed.includes('on.soundcloud.com/')) {
-        return this.resolveSoundCloudUrl(trimmed, requestedBy);
+      if (supported.platform === 'spotify') {
+        return SpotifyClient.resolveUrl(supported.normalizedUrl, requestedBy);
       }
-      if (
-        trimmed.includes('youtube.com/') ||
-        trimmed.includes('youtu.be/') ||
-        trimmed.includes('music.youtube.com/')
-      ) {
-        return this.resolveYouTubeUrl(trimmed, requestedBy);
+      if (supported.platform === 'soundcloud') {
+        return this.resolveSoundCloudUrl(supported.normalizedUrl, requestedBy);
       }
-      throw new Error('Неподдерживаемая ссылка. Поддерживаются YouTube, Spotify и SoundCloud.');
+      return this.resolveYouTubeUrl(supported.normalizedUrl, requestedBy);
     }
 
     if (platform === 'soundcloud') {
@@ -862,11 +944,10 @@ export class MusicResolver {
 
     // 2. Попытка воспроизведения через YouTube с проверкой реальных байт
     try {
-      let playableUrl = track.url;
-      if (
-        !playableUrl ||
-        (!playableUrl.includes('youtube.com') && !playableUrl.includes('youtu.be'))
-      ) {
+      const parsedPlayable = track.url ? this.parseSupportedUrl(track.url) : null;
+      let playableUrl =
+        parsedPlayable?.platform === 'youtube' ? parsedPlayable.normalizedUrl : '';
+      if (!playableUrl) {
         const q = track.searchQuery || `${track.author} - ${track.title}`;
         const results = await ytdl.search(q);
         const best = results[0];

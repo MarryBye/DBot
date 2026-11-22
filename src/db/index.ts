@@ -9,14 +9,25 @@ export const dataDir = path.resolve(process.cwd(), 'data');
 export const soundsDir = path.join(dataDir, 'sounds');
 
 if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 }
 if (!fs.existsSync(soundsDir)) {
-  fs.mkdirSync(soundsDir, { recursive: true });
+  fs.mkdirSync(soundsDir, { recursive: true, mode: 0o700 });
 }
 
-const sqlite = new Database(path.join(dataDir, 'bot.db'));
+const dbPath = path.join(dataDir, 'bot.db');
+const sqlite = new Database(dbPath);
 sqlite.pragma('journal_mode = WAL');
+
+// На Linux ограничиваем права доступа к папке data/ и базе сессий только владельцу процесса
+if (process.platform !== 'win32') {
+  try {
+    fs.chmodSync(dataDir, 0o700);
+    fs.chmodSync(dbPath, 0o600);
+  } catch {
+    // ignore on filesystems without POSIX chmod
+  }
+}
 
 // Инициализация таблиц
 sqlite.exec(`

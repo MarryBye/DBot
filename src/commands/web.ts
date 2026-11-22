@@ -1,4 +1,4 @@
-import { EmbedBuilder, SlashCommandBuilder } from 'discord.js';
+import { EmbedBuilder, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { config } from '../config.js';
 import { createMagicLoginLink } from '../web/auth.js';
 import type { Command } from '../types.js';
@@ -27,7 +27,7 @@ export const command: Command = {
       )
       .setFooter({ text: 'Не пересылайте ссылку другим — она привязана к вашему аккаунту Discord' });
 
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   },
   async executePrefix(message) {
     const magicLink = createMagicLoginLink({

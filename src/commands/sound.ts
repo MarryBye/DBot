@@ -6,7 +6,15 @@ import {
 import { config } from '../config.js';
 import { workerPool } from '../voice/index.js';
 import { MyInstantsClient, SoundboardService } from '../voice/soundboard.js';
+import {
+  assertTrustedDiscordCdnUrl,
+  DISCORD_CDN_ALLOWED_HOSTS,
+  readResponseBufferWithLimit,
+  safeFetch,
+} from '../web/security.js';
 import type { Command } from '../types.js';
+
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 export const command: Command = {
   data: new SlashCommandBuilder()
@@ -126,16 +134,23 @@ export const command: Command = {
       await interaction.deferReply({ ephemeral: true });
 
       try {
-        const res = await fetch(attachment.url);
+        if (attachment.size > MAX_ATTACHMENT_BYTES) {
+          throw new Error('Файл слишком большой (максимум 10 МБ).');
+        }
+        const safeAttachmentUrl = await assertTrustedDiscordCdnUrl(attachment.url);
+        const res = await safeFetch(safeAttachmentUrl.toString(), {
+          httpsOnly: true,
+          allowedHosts: DISCORD_CDN_ALLOWED_HOSTS,
+          timeoutMs: 15_000,
+        });
         if (!res.ok) throw new Error(`Не удалось скачать вложение (${res.status})`);
-        const buffer = Buffer.from(await res.arrayBuffer());
+        const buffer = await readResponseBufferWithLimit(res, MAX_ATTACHMENT_BYTES);
 
         const saved = await SoundboardService.saveCustomSound({
           guildId,
           name,
           buffer,
           originalFilename: attachment.name || 'sound.mp3',
-          mimeType: attachment.contentType ?? undefined,
           emoji,
           uploadedById: interaction.user.id,
           uploadedByTag: interaction.user.tag,
@@ -298,15 +313,22 @@ export const command: Command = {
       }
       const statusMsg = await message.reply('⏳ Загружаю звук...');
       try {
-        const res = await fetch(attachment.url);
+        if (attachment.size > MAX_ATTACHMENT_BYTES) {
+          throw new Error('Файл слишком большой (максимум 10 МБ).');
+        }
+        const safeAttachmentUrl = await assertTrustedDiscordCdnUrl(attachment.url);
+        const res = await safeFetch(safeAttachmentUrl.toString(), {
+          httpsOnly: true,
+          allowedHosts: DISCORD_CDN_ALLOWED_HOSTS,
+          timeoutMs: 15_000,
+        });
         if (!res.ok) throw new Error(`Не удалось скачать файл (${res.status})`);
-        const buffer = Buffer.from(await res.arrayBuffer());
+        const buffer = await readResponseBufferWithLimit(res, MAX_ATTACHMENT_BYTES);
         const saved = await SoundboardService.saveCustomSound({
           guildId,
           name,
           buffer,
           originalFilename: attachment.name || 'sound.mp3',
-          mimeType: attachment.contentType ?? undefined,
           uploadedById: message.author.id,
           uploadedByTag: message.author.tag,
         });

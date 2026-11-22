@@ -4,11 +4,17 @@ import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { config } from '../config.js';
+import { soundsDir } from '../db/index.js';
 import { workerPool } from '../voice/index.js';
 import { MusicResolver, type PlatformOption } from '../voice/music-resolver.js';
 import { PlaylistService } from '../voice/playlists.js';
-import { MyInstantsClient, SoundboardService } from '../voice/soundboard.js';
 import {
+  getSafeAudioMimeType,
+  MyInstantsClient,
+  SoundboardService,
+} from '../voice/soundboard.js';
+import {
+  canManageGlobalCookies,
   consumeMagicToken,
   createWebSession,
   deleteWebSession,
@@ -17,21 +23,30 @@ import {
   resolveMemberContext,
   setRequiredRoleId,
   updateSessionActiveGuild,
+  verifyLiveGuildAdmin,
 } from './auth.js';
+import {
+  applySecurityHeaders,
+  assertTrustedMyInstantsAudioUrl,
+  getClientIp,
+  RateLimiter,
+  redactSensitiveText,
+  verifyCsrfProtection,
+} from './security.js';
 
 const COOKIE_NAME = 'dbot_session';
 const publicDir = path.resolve(process.cwd(), 'public');
 const oauthStates = new Map<string, number>();
+const rateLimiter = new RateLimiter();
 
-const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-};
+// Строгий белый список статических файлов — делает Path Traversal структурно невозможным!
+const STATIC_FILES = new Map<string, { file: string; contentType: string }>([
+  ['/', { file: 'index.html', contentType: 'text/html; charset=utf-8' }],
+  ['/index.html', { file: 'index.html', contentType: 'text/html; charset=utf-8' }],
+  ['/styles.css', { file: 'styles.css', contentType: 'text/css; charset=utf-8' }],
+  ['/app.js', { file: 'app.js', contentType: 'application/javascript; charset=utf-8' }],
+  ['/favicon.ico', { file: 'favicon.ico', contentType: 'image/x-icon' }],
+]);
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie;
@@ -41,24 +56,30 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
     const idx = part.indexOf('=');
     if (idx === -1) continue;
     const key = part.slice(0, idx).trim();
-    const val = decodeURIComponent(part.slice(idx + 1).trim());
-    result[key] = val;
+    const rawVal = part.slice(idx + 1).trim();
+    try {
+      result[key] = decodeURIComponent(rawVal);
+    } catch {
+      // Игнорируем некорректно закодированные cookie
+    }
   }
   return result;
 }
 
 function setSessionCookie(res: ServerResponse, token: string): void {
   const maxAge = 7 * 24 * 60 * 60;
+  const secureFlag = config.publicUrl.startsWith('https://') ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`
+    `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax${secureFlag}; Max-Age=${maxAge}`
   );
 }
 
 function clearSessionCookie(res: ServerResponse): void {
+  const secureFlag = config.publicUrl.startsWith('https://') ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`
+    `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax${secureFlag}; Max-Age=0`
   );
 }
 
@@ -142,6 +163,7 @@ async function buildUserStatePayload(
       avatarUrl: ctx.avatarUrl,
       inGuild: ctx.inGuild,
       isAdmin: ctx.isAdmin,
+      canManageCookies: ctx.canManageCookies,
       hasAccess: ctx.hasAccess,
       requiredRoleId: ctx.requiredRoleId,
       requiredRoleName: ctx.requiredRoleName,
@@ -254,13 +276,34 @@ export function startWebServer(discordClient: Client): http.Server {
 
   const server = http.createServer(async (req, res) => {
     try {
-      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      applySecurityHeaders(res);
+
+      // Используем фиксированный базовый хост, чтобы некорректный Host-заголовок не ломал парсер
+      const url = new URL(req.url || '/', 'http://dbot.local');
       const pathname = url.pathname;
-      const method = req.method || 'GET';
+      const method = (req.method || 'GET').toUpperCase();
+      const clientIp = getClientIp(req);
+
+      if (pathname.startsWith('/api/')) {
+        if (!rateLimiter.check(`api:${clientIp}`, 180, 60_000)) {
+          sendJson(res, 429, { error: 'Слишком много запросов. Подождите немного.' });
+          return;
+        }
+        const csrfCheck = verifyCsrfProtection(req);
+        if (!csrfCheck.ok) {
+          sendJson(res, 403, { error: csrfCheck.reason || 'Ошибка проверки CSRF.' });
+          return;
+        }
+      }
 
       // ====================================================
       // 1. Публичные Auth маршруты
       // ====================================================
+      if (pathname.startsWith('/api/auth/') && !rateLimiter.check(`auth:${clientIp}`, 30, 60_000)) {
+        sendJson(res, 429, { error: 'Слишком много попыток входа. Попробуйте через минуту.' });
+        return;
+      }
+
       if (pathname === '/api/auth/info' && method === 'GET') {
         const cookies = parseCookies(req);
         const session = await getWebSession(cookies[COOKIE_NAME]);
@@ -295,8 +338,17 @@ export function startWebServer(discordClient: Client): http.Server {
           redirect(res, '/?authError=no_oauth');
           return;
         }
+        const now = Date.now();
+        for (const [k, exp] of oauthStates.entries()) {
+          if (exp < now) oauthStates.delete(k);
+        }
+        while (oauthStates.size >= 500) {
+          const oldest = oauthStates.keys().next().value;
+          if (!oldest) break;
+          oauthStates.delete(oldest);
+        }
         const state = crypto.randomBytes(16).toString('hex');
-        oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+        oauthStates.set(state, now + 10 * 60 * 1000);
 
         const redirectUri = `${config.publicUrl}/api/auth/callback`;
         const params = new URLSearchParams({
@@ -466,8 +518,10 @@ export function startWebServer(discordClient: Client): http.Server {
         const activeGuildId = ctx.guildId;
 
         // ---- Настройки администратора (выбор роли доступа для активного сервера) ----
+        // На всех /api/admin/* выполняем ЖИВУЮ проверку прав Администратора в Discord API (force: true)!
         if (pathname === '/api/admin/settings' && method === 'GET') {
-          if (!ctx.isAdmin) {
+          const liveAdmin = await verifyLiveGuildAdmin(discordClient, activeGuildId, session.userId);
+          if (!liveAdmin) {
             sendJson(res, 403, { error: 'Только администраторы сервера могут изменять настройки.' });
             return;
           }
@@ -484,12 +538,17 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/admin/settings' && method === 'POST') {
-          if (!ctx.isAdmin) {
+          const liveAdmin = await verifyLiveGuildAdmin(discordClient, activeGuildId, session.userId);
+          if (!liveAdmin) {
             sendJson(res, 403, { error: 'Только администраторы сервера могут изменять настройки.' });
             return;
           }
           const body = await readJsonBody<{ requiredRoleId?: string | null }>(req);
           const roleId = body.requiredRoleId ? String(body.requiredRoleId).trim() : null;
+          if (roleId && !/^\d{15,22}$/.test(roleId)) {
+            sendJson(res, 400, { error: 'Некорректный ID роли Discord.' });
+            return;
+          }
           await setRequiredRoleId(activeGuildId, roleId || null);
           workerPool.events.emit('stateChanged');
           sendJson(res, 200, { ok: true, requiredRoleId: roleId || null });
@@ -498,8 +557,9 @@ export function startWebServer(discordClient: Client): http.Server {
 
         // ---- Настройки администратора: YouTube Cookies (горячая загрузка и обновление) ----
         if (pathname === '/api/admin/cookies' && method === 'GET') {
-          if (!ctx.isAdmin) {
-            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+          const allowed = await canManageGlobalCookies(discordClient, activeGuildId, session.userId);
+          if (!allowed) {
+            sendJson(res, 403, { error: 'Доступ запрещён: требуется роль Администратора сервера.' });
             return;
           }
           sendJson(res, 200, MusicResolver.getCookiesStatus());
@@ -507,45 +567,73 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/admin/cookies' && method === 'POST') {
-          if (!ctx.isAdmin) {
-            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+          const allowed = await canManageGlobalCookies(discordClient, activeGuildId, session.userId);
+          if (!allowed) {
+            sendJson(res, 403, { error: 'Доступ запрещён: требуется роль Администратора сервера.' });
             return;
           }
-          const body = await readJsonBody<{ content?: string }>(req, 2 * 1024 * 1024);
+          if (!rateLimiter.check(`cookies:${session.userId}`, 10, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частая загрузка cookies. Попробуйте через минуту.' });
+            return;
+          }
+          const body = await readJsonBody<{ content?: string }>(req, 260 * 1024);
           const content = String(body.content || '');
           try {
-            const status = MusicResolver.updateCookies(content);
-            sendJson(res, 200, { ok: true, status });
+            const actor = `${ctx.displayName} (${session.userId})`;
+            const result = MusicResolver.updateCookies(content, actor);
+            sendJson(res, 200, {
+              ok: true,
+              status: {
+                hasCookies: result.hasCookies,
+                source: result.source,
+                updatedAt: result.updatedAt,
+                lineCount: result.lineCount,
+              },
+              keptCount: result.keptCount,
+              strippedCount: result.strippedCount,
+            });
           } catch (err: any) {
             sendJson(res, 400, {
-              error: err?.message || 'Некорректный формат cookies.txt.',
+              error: redactSensitiveText(err?.message || 'Некорректный формат cookies.txt.'),
             });
           }
           return;
         }
 
         if (pathname === '/api/admin/cookies/reload' && method === 'POST') {
-          if (!ctx.isAdmin) {
-            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+          const allowed = await canManageGlobalCookies(discordClient, activeGuildId, session.userId);
+          if (!allowed) {
+            sendJson(res, 403, { error: 'Доступ запрещён: требуется роль Администратора сервера.' });
+            return;
+          }
+          if (!rateLimiter.check(`cookies:${session.userId}`, 10, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частые запросы обновления cookies.' });
             return;
           }
           try {
-            const status = MusicResolver.reloadCookiesFromDisk();
+            const actor = `${ctx.displayName} (${session.userId})`;
+            const status = MusicResolver.reloadCookiesFromDisk(actor);
             sendJson(res, 200, { ok: true, status });
           } catch (err: any) {
             sendJson(res, 400, {
-              error: err?.message || 'Не удалось перечитать cookies.txt с диска.',
+              error: redactSensitiveText(err?.message || 'Не удалось перечитать cookies.txt с диска.'),
             });
           }
           return;
         }
 
         if (pathname === '/api/admin/cookies' && method === 'DELETE') {
-          if (!ctx.isAdmin) {
-            sendJson(res, 403, { error: 'Только администраторы сервера могут управлять YouTube cookies.' });
+          const allowed = await canManageGlobalCookies(discordClient, activeGuildId, session.userId);
+          if (!allowed) {
+            sendJson(res, 403, { error: 'Доступ запрещён: требуется роль Администратора сервера.' });
             return;
           }
-          const status = MusicResolver.clearCookies();
+          if (!rateLimiter.check(`cookies:${session.userId}`, 10, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частые запросы управления cookies.' });
+            return;
+          }
+          const actor = `${ctx.displayName} (${session.userId})`;
+          const status = MusicResolver.clearCookies(actor);
           sendJson(res, 200, { ok: true, status });
           return;
         }
@@ -588,14 +676,17 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/soundboard/upload' && method === 'POST') {
+          if (!rateLimiter.check(`upload:${session.userId}`, 15, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частая загрузка файлов. Подождите минуту.' });
+            return;
+          }
           const body = await readJsonBody<{
             name?: string;
             filename?: string;
-            mimeType?: string;
             dataBase64?: string;
             color?: string;
             emoji?: string;
-          }>(req, 16 * 1024 * 1024);
+          }>(req, 15 * 1024 * 1024);
 
           if (!body.name || !body.dataBase64) {
             sendJson(res, 400, { error: 'Укажите название звука и выберите аудиофайл.' });
@@ -607,24 +698,31 @@ export function startWebServer(discordClient: Client): http.Server {
             : body.dataBase64;
           const buffer = Buffer.from(rawBase64, 'base64');
 
-          const saved = await SoundboardService.saveCustomSound({
-            guildId: activeGuildId,
-            name: body.name,
-            buffer,
-            originalFilename: body.filename || 'sound.mp3',
-            mimeType: body.mimeType,
-            color: body.color,
-            emoji: body.emoji,
-            uploadedById: session.userId,
-            uploadedByTag: ctx.displayName,
-          });
+          try {
+            const saved = await SoundboardService.saveCustomSound({
+              guildId: activeGuildId,
+              name: body.name,
+              buffer,
+              originalFilename: body.filename || 'sound.mp3',
+              color: body.color,
+              emoji: body.emoji,
+              uploadedById: session.userId,
+              uploadedByTag: ctx.displayName,
+            });
 
-          workerPool.events.emit('soundsChanged');
-          sendJson(res, 201, { sound: saved });
+            workerPool.events.emit('soundsChanged');
+            sendJson(res, 201, { sound: saved });
+          } catch (err: any) {
+            sendJson(res, 400, { error: redactSensitiveText(err?.message || 'Ошибка загрузки звука.') });
+          }
           return;
         }
 
         if (pathname === '/api/soundboard/save-meme' && method === 'POST') {
+          if (!rateLimiter.check(`upload:${session.userId}`, 15, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частое сохранение мемов. Подождите минуту.' });
+            return;
+          }
           const body = await readJsonBody<{
             name?: string;
             url?: string;
@@ -637,18 +735,22 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
 
-          const saved = await SoundboardService.saveSoundFromUrl({
-            guildId: activeGuildId,
-            name: body.name,
-            url: body.url,
-            color: body.color,
-            emoji: body.emoji || '😂',
-            uploadedById: session.userId,
-            uploadedByTag: ctx.displayName,
-          });
+          try {
+            const saved = await SoundboardService.saveSoundFromUrl({
+              guildId: activeGuildId,
+              name: body.name,
+              url: body.url,
+              color: body.color,
+              emoji: body.emoji || '😂',
+              uploadedById: session.userId,
+              uploadedByTag: ctx.displayName,
+            });
 
-          workerPool.events.emit('soundsChanged');
-          sendJson(res, 201, { sound: saved });
+            workerPool.events.emit('soundsChanged');
+            sendJson(res, 201, { sound: saved });
+          } catch (err: any) {
+            sendJson(res, 400, { error: redactSensitiveText(err?.message || 'Ошибка сохранения мема.') });
+          }
           return;
         }
 
@@ -678,8 +780,20 @@ export function startWebServer(discordClient: Client): http.Server {
             sendJson(res, 404, { error: 'Файл не найден на диске.' });
             return;
           }
-          res.writeHead(200, { 'Content-Type': record.mimeType || 'audio/mpeg' });
-          fs.createReadStream(filePath).pipe(res);
+          const lstat = fs.lstatSync(filePath);
+          const realFile = fs.realpathSync(filePath);
+          const realSoundsRoot = fs.realpathSync(soundsDir);
+          if (lstat.isSymbolicLink() || !lstat.isFile() || !realFile.startsWith(realSoundsRoot + path.sep)) {
+            sendJson(res, 403, { error: 'Доступ к файлу запрещён.' });
+            return;
+          }
+          // Изолированный аудио-ответ: только безопасный audio/* MIME + sandbox CSP (полная защита от Stored XSS!)
+          applySecurityHeaders(res, { isSandboxedMedia: true });
+          res.writeHead(200, {
+            'Content-Type': getSafeAudioMimeType(record.filename),
+            'Cache-Control': 'private, no-store',
+          });
+          fs.createReadStream(realFile).pipe(res);
           return;
         }
 
@@ -742,23 +856,29 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
 
-          const tracks = await MusicResolver.resolve(
-            query,
-            { id: session.userId, tag: ctx.displayName },
-            platform
-          );
-          if (tracks.length === 0) {
-            sendJson(res, 404, { error: 'Ничего не найдено по вашему запросу.' });
-            return;
-          }
+          try {
+            const tracks = await MusicResolver.resolve(
+              query,
+              { id: session.userId, tag: ctx.displayName },
+              platform
+            );
+            if (tracks.length === 0) {
+              sendJson(res, 404, { error: 'Ничего не найдено по вашему запросу.' });
+              return;
+            }
 
-          const result = await worker.queue.add(tracks);
-          sendJson(res, 200, {
-            ok: true,
-            addedCount: result.addedCount,
-            isPlayingNow: result.isPlayingNow,
-            track: tracks[0],
-          });
+            const result = await worker.queue.add(tracks);
+            sendJson(res, 200, {
+              ok: true,
+              addedCount: result.addedCount,
+              isPlayingNow: result.isPlayingNow,
+              track: tracks[0],
+            });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось воспроизвести трек.'),
+            });
+          }
           return;
         }
 
@@ -784,20 +904,35 @@ export function startWebServer(discordClient: Client): http.Server {
               sendJson(res, 404, { error: 'Звук не найден.' });
               return;
             }
-            await worker.queue.playSoundEffect({
-              name: record.name,
-              filePath: SoundboardService.getSoundFilePath(record),
-            });
-            sendJson(res, 200, { ok: true, played: record.name });
+            try {
+              await worker.queue.playSoundEffect({
+                name: record.name,
+                filePath: SoundboardService.getSoundFilePath(record),
+              });
+              sendJson(res, 200, { ok: true, played: record.name });
+            } catch (err: any) {
+              sendJson(res, 400, {
+                error: redactSensitiveText(err?.message || 'Не удалось воспроизвести звук.'),
+              });
+            }
             return;
           }
 
           if (body.type === 'url' && body.url) {
-            await worker.queue.playSoundEffect({
-              name: body.name || 'Мем',
-              url: body.url,
-            });
-            sendJson(res, 200, { ok: true, played: body.name || 'Мем' });
+            // Строго разрешаем только проверенные HTTPS аудиоссылки MyInstants (блокирует SSRF и FFmpeg file://!)
+            try {
+              const safeMemeUrl = await assertTrustedMyInstantsAudioUrl(body.url);
+              const safeName = String(body.name || 'Мем').slice(0, 80);
+              await worker.queue.playSoundEffect({
+                name: safeName,
+                url: safeMemeUrl.toString(),
+              });
+              sendJson(res, 200, { ok: true, played: safeName });
+            } catch (err: any) {
+              sendJson(res, 400, {
+                error: redactSensitiveText(err?.message || 'Разрешены только звуки с MyInstants.'),
+              });
+            }
             return;
           }
 
@@ -835,13 +970,19 @@ export function startWebServer(discordClient: Client): http.Server {
             id: session.userId,
             tag: ctx.displayName,
           });
-          const result = await worker.queue.replaceQueue(tracks);
-          sendJson(res, 200, {
-            ok: true,
-            playlistName: playlist.name,
-            loadedCount: result.loadedCount,
-            firstTrack: result.firstTrack,
-          });
+          try {
+            const result = await worker.queue.replaceQueue(tracks);
+            sendJson(res, 200, {
+              ok: true,
+              playlistName: playlist.name,
+              loadedCount: result.loadedCount,
+              firstTrack: result.firstTrack,
+            });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось загрузить плейлист.'),
+            });
+          }
           return;
         }
 
@@ -966,33 +1107,42 @@ export function startWebServer(discordClient: Client): http.Server {
       }
 
       // ====================================================
-      // 4. Раздача статических файлов веб-приложения (public/)
+      // 4. Раздача статических файлов веб-приложения (строгий белый список — Path Traversal невозможен!)
       // ====================================================
-      const requestedPath = pathname === '/' ? '/index.html' : pathname;
-      const resolvedFile = path.resolve(publicDir, `.${requestedPath}`);
+      if (method !== 'GET' && method !== 'HEAD') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method Not Allowed');
+        return;
+      }
 
-      if (!resolvedFile.startsWith(publicDir) || !fs.existsSync(resolvedFile) || fs.statSync(resolvedFile).isDirectory()) {
-        const fallback = path.join(publicDir, 'index.html');
-        if (fs.existsSync(fallback)) {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          fs.createReadStream(fallback).pipe(res);
-          return;
-        }
-        res.writeHead(404);
+      const staticEntry = STATIC_FILES.get(pathname);
+      if (!staticEntry) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Not Found');
         return;
       }
 
-      const ext = path.extname(resolvedFile).toLowerCase();
+      const resolvedFile = path.join(publicDir, staticEntry.file);
+      if (!fs.existsSync(resolvedFile)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Not Found');
+        return;
+      }
+
       res.writeHead(200, {
-        'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+        'Content-Type': staticEntry.contentType,
         'Cache-Control': 'no-cache',
       });
+      if (method === 'HEAD') {
+        res.end();
+        return;
+      }
       fs.createReadStream(resolvedFile).pipe(res);
     } catch (err: any) {
       console.error('❌ [WebServer] Ошибка обработки запроса:', err);
       if (!res.headersSent) {
-        sendJson(res, 500, { error: err?.message || 'Внутренняя ошибка сервера.' });
+        // Не раскрываем внутренние пути, стек или детали исключений клиенту
+        sendJson(res, 500, { error: 'Внутренняя ошибка сервера.' });
       }
     }
   });

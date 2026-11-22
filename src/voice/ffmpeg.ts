@@ -1,8 +1,11 @@
 import ffmpegStatic from 'ffmpeg-static';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
+import { soundsDir } from '../db/index.js';
+import { assertSafePublicHttpUrl, safeFetch } from '../web/security.js';
 
 let cachedFfmpegPath: string | null = null;
 
@@ -55,18 +58,44 @@ export function spawnPcmDecoder(
   const isStream = typeof input !== 'string';
 
   const args: string[] = ['-loglevel', 'error'];
+  let safeInputArg = 'pipe:0';
 
-  if (!isStream && /^https?:\/\//i.test(input)) {
-    args.push(
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      '-user_agent', 'Mozilla/5.0'
-    );
+  if (isStream) {
+    args.push('-protocol_whitelist', 'pipe');
+  } else {
+    const trimmed = input.trim();
+    if (!trimmed || trimmed.startsWith('-') || /[\0\r\n]/.test(trimmed)) {
+      throw new Error('Недопустимый источник аудиопотока.');
+    }
+
+    if (/^https?:\/\//i.test(trimmed)) {
+      // Строго ограничиваем протоколы FFmpeg (исключает file://, concat:, subfile: внутри HLS .m3u8!)
+      args.push(
+        '-protocol_whitelist', 'http,https,tcp,tls,crypto',
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        '-user_agent', 'Mozilla/5.0'
+      );
+      safeInputArg = trimmed;
+    } else {
+      // Локальные файлы разрешены ТОЛЬКО внутри папки data/sounds/ (никаких .env или data/cookies.txt!)
+      const realSoundsRoot = fs.realpathSync(soundsDir);
+      const lstat = fs.lstatSync(trimmed);
+      if (lstat.isSymbolicLink() || !lstat.isFile()) {
+        throw new Error('Запрещённый локальный файл аудио.');
+      }
+      const realFile = fs.realpathSync(trimmed);
+      if (!realFile.startsWith(realSoundsRoot + path.sep)) {
+        throw new Error('Доступ к файлам вне библиотеки саундборда запрещён.');
+      }
+      args.push('-protocol_whitelist', 'file');
+      safeInputArg = realFile;
+    }
   }
 
   args.push(
-    '-i', isStream ? 'pipe:0' : input,
+    '-i', safeInputArg,
     '-vn',
     '-f', 's16le',
     '-ar', '48000',
@@ -155,13 +184,18 @@ export async function spawnPcmDecoderFromUrl(
   url: string,
   label = 'url'
 ): Promise<PcmDecoderHandle> {
-  const isHls = url.includes('.m3u8') || url.includes('/hls/');
+  // Гарантируем, что URL ведёт строго на публичный HTTP(S)-ресурс (блокирует SSRF / file:// / IMDS)
+  const validated = await assertSafePublicHttpUrl(url);
+  const safeUrl = validated.toString();
+
+  const isHls = validated.pathname.includes('.m3u8') || validated.pathname.includes('/hls/');
   if (isHls) {
-    return spawnPcmDecoder(url, label);
+    return spawnPcmDecoder(safeUrl, label);
   }
 
-  const res = await fetch(url, {
+  const res = await safeFetch(safeUrl, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
+    timeoutMs: 15_000,
   });
 
   if (!res.ok || !res.body) {

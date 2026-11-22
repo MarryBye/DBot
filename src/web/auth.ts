@@ -44,6 +44,7 @@ export interface ResolvedMemberContext {
   member: GuildMember | null;
   inGuild: boolean;
   isAdmin: boolean;
+  canManageCookies: boolean;
   hasAccess: boolean;
   requiredRoleId: string | null;
   requiredRoleName: string | null;
@@ -62,6 +63,11 @@ export function createMagicLoginLink(user: {
   const now = Date.now();
   for (const [k, v] of magicTokens.entries()) {
     if (v.expiresAt < now) magicTokens.delete(k);
+  }
+  while (magicTokens.size >= 500) {
+    const oldestKey = magicTokens.keys().next().value;
+    if (!oldestKey) break;
+    magicTokens.delete(oldestKey);
   }
 
   const token = crypto.randomBytes(24).toString('hex');
@@ -226,6 +232,7 @@ export async function resolveMemberContext(
       member: null,
       inGuild: false,
       isAdmin: false,
+      canManageCookies: false,
       hasAccess: false,
       requiredRoleId: null,
       requiredRoleName: null,
@@ -260,6 +267,8 @@ export async function resolveMemberContext(
     : null;
 
   const isAdmin = member.permissions.has(PermissionFlagsBits.Administrator);
+  const canManageCookies =
+    isAdmin && (config.botOwnerIds.length === 0 || config.botOwnerIds.includes(userId));
   const hasAccess = isAdmin || !requiredRoleId || member.roles.cache.has(requiredRoleId);
 
   const voiceState = guild.voiceStates.cache.get(userId);
@@ -274,6 +283,7 @@ export async function resolveMemberContext(
     member,
     inGuild: true,
     isAdmin,
+    canManageCookies,
     hasAccess,
     requiredRoleId,
     requiredRoleName,
@@ -287,4 +297,39 @@ export async function resolveMemberContext(
     },
     sharedGuilds,
   };
+}
+
+/**
+ * Живая проверка прав Администратора напрямую через Discord API (force: true),
+ * минуя локальный кэш discord.js — снятие админской роли на сервере блокирует доступ МГНОВЕННО!
+ */
+export async function verifyLiveGuildAdmin(
+  client: Client,
+  guildId: string,
+  userId: string
+): Promise<boolean> {
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return false;
+  try {
+    const freshMember = await guild.members.fetch({ user: userId, force: true });
+    return freshMember.permissions.has(PermissionFlagsBits.Administrator);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Проверка права на управление глобальными YouTube cookies:
+ * 1) Пользователь обязан прямо сейчас иметь роль/право Administrator на сервере (живой запрос к Discord API).
+ * 2) Если в .env задан BOT_OWNER_IDS — дополнительно требуется вхождение userId в этот список.
+ */
+export async function canManageGlobalCookies(
+  client: Client,
+  guildId: string,
+  userId: string
+): Promise<boolean> {
+  if (config.botOwnerIds.length > 0 && !config.botOwnerIds.includes(userId)) {
+    return false;
+  }
+  return verifyLiveGuildAdmin(client, guildId, userId);
 }

@@ -24,6 +24,27 @@
       .replace(/'/g, '&#39;');
   }
 
+  function safeHttpUrl(url, allowLocalApi = false) {
+    if (typeof url !== 'string') return '#';
+    const trimmed = url.trim();
+    if (allowLocalApi && trimmed.startsWith('/api/soundboard/file/')) {
+      return trimmed;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        return parsed.toString();
+      }
+    } catch {}
+    return '#';
+  }
+
+  function safeColor(color) {
+    return typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color.trim())
+      ? color.trim()
+      : '#5865f2';
+  }
+
   function formatDuration(sec) {
     if (!Number.isFinite(sec) || sec <= 0) return '0:00';
     const h = Math.floor(sec / 3600);
@@ -47,7 +68,11 @@
 
   async function api(url, options = {}) {
     const res = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-DBot-CSRF': '1',
+        ...(options.headers || {}),
+      },
       ...options,
     });
     const data = await res.json().catch(() => ({}));
@@ -165,9 +190,10 @@
     }
 
     $('user-name').textContent = state.user.displayName;
-    if (state.user.avatarUrl) $('user-avatar').src = state.user.avatarUrl;
+    if (state.user.avatarUrl) $('user-avatar').src = safeHttpUrl(state.user.avatarUrl);
     $('user-role-badge').classList.toggle('hidden', !state.user.isAdmin);
     $('admin-tab-btn').classList.toggle('hidden', !state.user.isAdmin);
+    syncAdminPanelVisibility(Boolean(state.user.isAdmin), Boolean(state.user.canManageCookies));
 
     // Голосовой статус
     const inVoice = Boolean(state.voice?.inVoice);
@@ -257,10 +283,14 @@
     if (hasTrack) {
       const t = worker.currentTrack;
       $('np-title').textContent = t.title;
-      $('np-title').href = t.originalUrl || '#';
+      $('np-title').href = safeHttpUrl(t.originalUrl);
       $('np-author').textContent = t.author || '';
       $('np-requester').textContent = `Запросил: ${t.requestedBy?.tag || 'Неизвестно'}`;
-      $('np-thumb').src = t.thumbnail || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"><rect fill="%23222635" width="80" height="80"/><text x="40" y="50" text-anchor="middle" font-size="32">🎵</text></svg>';
+      const safeThumb = t.thumbnail ? safeHttpUrl(t.thumbnail) : '#';
+      $('np-thumb').src =
+        safeThumb !== '#'
+          ? safeThumb
+          : 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"><rect fill="%23222635" width="80" height="80"/><text x="40" y="50" text-anchor="middle" font-size="32">🎵</text></svg>';
 
       const srcEl = $('np-source');
       srcEl.className = `source-badge ${t.source}`;
@@ -347,8 +377,9 @@
     listEl.innerHTML = queue
       .map((t, i) => {
         const platDot = t.source === 'spotify' ? '🟢' : t.source === 'soundcloud' ? '🟠' : '🔴';
-        const thumb = t.thumbnail
-          ? `<img class="queue-thumb" src="${escapeHtml(t.thumbnail)}" alt="" />`
+        const thumbUrl = t.thumbnail ? safeHttpUrl(t.thumbnail) : '#';
+        const thumb = thumbUrl !== '#'
+          ? `<img class="queue-thumb" src="${escapeHtml(thumbUrl)}" alt="" />`
           : '<div class="queue-thumb"></div>';
         return `
           <div class="queue-item" draggable="${inVoice ? 'true' : 'false'}" data-index="${i}">
@@ -444,7 +475,7 @@
     grid.innerHTML = customSounds
       .map(
         (s) => `
-        <div class="sound-tile" style="--tile-color:${escapeHtml(s.color || '#5865f2')}">
+        <div class="sound-tile" style="--tile-color:${safeColor(s.color)}">
           <button class="sound-play-area" data-play-custom="${s.id}" ${!inVoice ? 'disabled' : ''} title="${inVoice ? 'Воспроизвести в голосовой канал' : 'Зайдите в голосовой канал'}">
             <span class="sound-emoji">${escapeHtml(s.emoji || '🔊')}</span>
             <span class="sound-name">${escapeHtml(s.name)}</span>
@@ -489,7 +520,7 @@
     grid.innerHTML = memesList
       .map(
         (m, idx) => `
-        <div class="sound-tile" style="--tile-color:${escapeHtml(m.color || '#5865f2')}">
+        <div class="sound-tile" style="--tile-color:${safeColor(m.color)}">
           <button class="sound-play-area" data-play-meme="${idx}" ${!inVoice ? 'disabled' : ''} title="${inVoice ? 'Проиграть мем в Discord' : 'Зайдите в голосовой канал'}">
             <span class="sound-emoji">😂</span>
             <span class="sound-name">${escapeHtml(m.name)}</span>
@@ -497,7 +528,7 @@
           <div class="sound-footer">
             <span class="sound-meta">MyInstants</span>
             <div class="sound-tools">
-              <button class="icon-btn" data-preview-url="${escapeHtml(m.url)}" title="Прослушать у себя">🎧</button>
+              <button class="icon-btn" data-preview-url="${escapeHtml(safeHttpUrl(m.url))}" title="Прослушать у себя">🎧</button>
               <button class="icon-btn" data-save-meme="${idx}" title="Сохранить в «Мои звуки»">💾</button>
             </div>
           </div>
@@ -549,7 +580,7 @@
           ? `<div class="playlist-tracks">${(p.tracks || [])
               .map((t, i) => {
                 const dot = t.source === 'spotify' ? '🟢' : t.source === 'soundcloud' ? '🟠' : '🔴';
-                const href = escapeHtml(t.originalUrl || '#');
+                const href = escapeHtml(safeHttpUrl(t.originalUrl));
                 return `
                   <div class="playlist-track-row">
                     <span class="playlist-track-idx">${i + 1}.</span>
@@ -629,7 +660,84 @@
     }
   }
 
-  // ==================== Админские настройки ====================
+  // ==================== Админские настройки (рендерятся ТОЛЬКО для админов) ====================
+  let mountedAdminMode = null;
+
+  function syncAdminPanelVisibility(isAdmin, canManageCookies) {
+    const adminPanel = $('tab-admin');
+    if (!adminPanel) return;
+
+    if (!isAdmin) {
+      if (mountedAdminMode !== null || adminPanel.innerHTML !== '') {
+        adminPanel.innerHTML = '';
+        mountedAdminMode = null;
+      }
+      if (adminPanel.classList.contains('active')) {
+        document.querySelectorAll('.tab-btn').forEach((b) =>
+          b.classList.toggle('active', b.dataset.tab === 'player')
+        );
+        document.querySelectorAll('.tab-panel').forEach((p) =>
+          p.classList.toggle('active', p.id === 'tab-player')
+        );
+      }
+      return;
+    }
+
+    const desiredMode = canManageCookies ? 'full' : 'roles-only';
+    if (mountedAdminMode === desiredMode) return;
+    mountedAdminMode = desiredMode;
+
+    const rolesHtml = `
+      <div class="card admin-card">
+        <h2>⚙️ Права доступа к веб-панели</h2>
+        <p class="muted">Выберите роль Discord, необходимую для управления очередью и саундбордом. Администраторы сервера имеют доступ всегда.</p>
+        <form id="admin-settings-form" class="admin-form">
+          <label for="required-role-select">Минимальная роль для доступа:</label>
+          <select id="required-role-select">
+            <option value="">🌐 Доступ открыт всем участникам сервера</option>
+          </select>
+          <button type="submit" class="btn btn-primary">💾 Сохранить настройки</button>
+        </form>
+      </div>
+    `;
+
+    const cookiesHtml = canManageCookies
+      ? `
+      <div class="card admin-card">
+        <h2>🍪 YouTube Cookies (горячее обновление)</h2>
+        <p class="muted small" style="margin-bottom: 12px;">
+          Доступно только администраторам. Экспортируйте <code>cookies.txt</code> в режиме Инкогнито со страницы <code>youtube.com/robots.txt</code> (и закройте вкладку без «Выйти»).
+          Посторонние домены вырезаются автоматически; содержимое cookies никогда не отдаётся обратно на сайт.
+        </p>
+
+        <div id="cookies-status" class="cookies-status">Загрузка статуса cookies...</div>
+
+        <div class="cookies-upload-row">
+          <label class="file-btn">
+            <span id="cookies-file-label">📄 Выбрать файл cookies.txt</span>
+            <input type="file" id="cookies-file" accept=".txt,text/plain" hidden />
+          </label>
+        </div>
+
+        <textarea
+          id="cookies-textarea"
+          class="cookies-textarea"
+          rows="6"
+          placeholder="Выберите файл cookies.txt выше или вставьте его содержимое сюда (формат Netscape HTTP Cookie File)..."
+        ></textarea>
+
+        <div class="btn-row">
+          <button type="button" id="btn-cookies-save" class="btn btn-primary">💾 Загрузить и применить</button>
+          <button type="button" id="btn-cookies-reload" class="btn btn-secondary">🔄 Перечитать с диска</button>
+          <button type="button" id="btn-cookies-clear" class="btn btn-danger">🗑️ Удалить cookies</button>
+        </div>
+      </div>
+      `
+      : '';
+
+    adminPanel.innerHTML = rolesHtml + cookiesHtml;
+  }
+
   function renderCookiesStatus(status) {
     const el = $('cookies-status');
     if (!el) return;
@@ -651,19 +759,23 @@
 
   async function loadAdminSettings() {
     if (!state?.user?.isAdmin) return;
+    syncAdminPanelVisibility(true, Boolean(state.user.canManageCookies));
     try {
-      const [data, cookiesStatus] = await Promise.all([
-        api('/api/admin/settings'),
-        api('/api/admin/cookies').catch(() => null),
-      ]);
+      const promises = [api('/api/admin/settings')];
+      if (state.user.canManageCookies) {
+        promises.push(api('/api/admin/cookies').catch(() => null));
+      }
+      const [data, cookiesStatus] = await Promise.all(promises);
       const select = $('required-role-select');
-      select.innerHTML = '<option value="">🌐 Доступ открыт всем участникам сервера</option>';
-      for (const r of data.roles || []) {
-        const opt = document.createElement('option');
-        opt.value = r.id;
-        opt.textContent = `@${r.name}`;
-        if (data.requiredRoleId === r.id) opt.selected = true;
-        select.appendChild(opt);
+      if (select) {
+        select.innerHTML = '<option value="">🌐 Доступ открыт всем участникам сервера</option>';
+        for (const r of data.roles || []) {
+          const opt = document.createElement('option');
+          opt.value = r.id;
+          opt.textContent = `@${r.name}`;
+          if (data.requiredRoleId === r.id) opt.selected = true;
+          select.appendChild(opt);
+        }
       }
       if (cookiesStatus) renderCookiesStatus(cookiesStatus);
     } catch (err) {
@@ -676,6 +788,7 @@
   document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const tab = btn.dataset.tab;
+      if (tab === 'admin' && !state?.user?.isAdmin) return;
       document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
       document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${tab}`));
       if (tab === 'admin') loadAdminSettings();
@@ -964,9 +1077,11 @@
 
   // Клики по сеткам саундборда (свои звуки + мемы)
   function playPreview(url) {
+    const safe = safeHttpUrl(url, true);
+    if (safe === '#') return;
     const audio = $('preview-audio');
     audio.pause();
-    audio.src = url;
+    audio.src = safe;
     audio.volume = 0.7;
     audio.play().catch(() => {});
   }
@@ -1070,10 +1185,13 @@
     });
   });
 
-  // Сохранение админских настроек
-  $('admin-settings-form').addEventListener('submit', async (e) => {
+  // Делегированные обработчики админской вкладки (активны только если DOM смонтирован для админа)
+  const adminPanelEl = $('tab-admin');
+  adminPanelEl.addEventListener('submit', async (e) => {
+    if (e.target.id !== 'admin-settings-form') return;
     e.preventDefault();
-    const roleId = $('required-role-select').value || null;
+    if (!state?.user?.isAdmin) return;
+    const roleId = $('required-role-select')?.value || null;
     try {
       await api('/api/admin/settings', {
         method: 'POST',
@@ -1082,6 +1200,95 @@
       showToast('💾 Настройки доступа сохранены!', 'success');
     } catch (err) {
       showToast(err.message, 'error');
+    }
+  });
+
+  adminPanelEl.addEventListener('change', async (e) => {
+    if (e.target.id !== 'cookies-file') return;
+    if (!state?.user?.isAdmin || !state?.user?.canManageCookies) return;
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 256 * 1024) {
+      showToast('Файл cookies.txt слишком большой (максимум 256 КБ)', 'error');
+      e.target.value = '';
+      return;
+    }
+    const label = $('cookies-file-label');
+    if (label) label.textContent = `📄 ${file.name}`;
+    try {
+      const text = await file.text();
+      const ta = $('cookies-textarea');
+      if (ta) ta.value = text;
+      showToast(`📄 Файл «${file.name}» прочитан — нажмите «Загрузить и применить»`, 'info');
+    } catch {
+      showToast('Не удалось прочитать файл cookies.txt', 'error');
+    }
+  });
+
+  adminPanelEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    if (!state?.user?.isAdmin || !state?.user?.canManageCookies) return;
+
+    if (btn.id === 'btn-cookies-save') {
+      const ta = $('cookies-textarea');
+      const content = ta ? ta.value.trim() : '';
+      if (!content) {
+        showToast('Выберите файл cookies.txt или вставьте его содержимое в поле выше', 'error');
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = '⏳ Проверяю и применяю...';
+      try {
+        const res = await api('/api/admin/cookies', {
+          method: 'POST',
+          body: JSON.stringify({ content }),
+        });
+        renderCookiesStatus(res.status);
+        if (ta) ta.value = '';
+        const fileEl = $('cookies-file');
+        if (fileEl) fileEl.value = '';
+        const label = $('cookies-file-label');
+        if (label) label.textContent = '📄 Выбрать файл cookies.txt';
+        const stripNote =
+          res.strippedCount > 0
+            ? ` (автоматически вырезано ${res.strippedCount} посторонних доменов)`
+            : '';
+        showToast(`🍪 YouTube cookies применены без перезапуска!${stripNote}`, 'success');
+      } catch (err) {
+        showToast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '💾 Загрузить и применить';
+      }
+      return;
+    }
+
+    if (btn.id === 'btn-cookies-reload') {
+      btn.disabled = true;
+      try {
+        const res = await api('/api/admin/cookies/reload', { method: 'POST' });
+        renderCookiesStatus(res.status);
+        showToast('🔄 Cookies перечитаны с диска и применены!', 'success');
+      } catch (err) {
+        showToast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
+      return;
+    }
+
+    if (btn.id === 'btn-cookies-clear') {
+      if (!confirm('Удалить файл data/cookies.txt и переключить YouTube на работу без cookies?')) {
+        return;
+      }
+      try {
+        const res = await api('/api/admin/cookies', { method: 'DELETE' });
+        renderCookiesStatus(res.status);
+        showToast('🗑️ Файл cookies.txt удалён', 'info');
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
     }
   });
 
@@ -1185,74 +1392,6 @@
         loadBtn.textContent = orig;
         loadBtn.disabled = !state?.voice?.inVoice;
       }
-    }
-  });
-
-  // Админ: YouTube Cookies (выбор файла, загрузка, перечитывание, удаление)
-  $('cookies-file').addEventListener('change', async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    $('cookies-file-label').textContent = `📄 ${file.name}`;
-    try {
-      const text = await file.text();
-      $('cookies-textarea').value = text;
-      showToast(`📄 Файл «${file.name}» прочитан — нажмите «Загрузить и применить»`, 'info');
-    } catch {
-      showToast('Не удалось прочитать файл cookies.txt', 'error');
-    }
-  });
-
-  $('btn-cookies-save').addEventListener('click', async () => {
-    const content = $('cookies-textarea').value.trim();
-    if (!content) {
-      showToast('Выберите файл cookies.txt или вставьте его содержимое в поле выше', 'error');
-      return;
-    }
-    const btn = $('btn-cookies-save');
-    btn.disabled = true;
-    btn.textContent = '⏳ Проверяю и применяю...';
-    try {
-      const res = await api('/api/admin/cookies', {
-        method: 'POST',
-        body: JSON.stringify({ content }),
-      });
-      renderCookiesStatus(res.status);
-      $('cookies-textarea').value = '';
-      $('cookies-file').value = '';
-      $('cookies-file-label').textContent = '📄 Выбрать файл cookies.txt';
-      showToast('🍪 YouTube cookies успешно сохранены и применены без перезапуска!', 'success');
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '💾 Загрузить и применить';
-    }
-  });
-
-  $('btn-cookies-reload').addEventListener('click', async () => {
-    const btn = $('btn-cookies-reload');
-    btn.disabled = true;
-    try {
-      const res = await api('/api/admin/cookies/reload', { method: 'POST' });
-      renderCookiesStatus(res.status);
-      showToast('🔄 Cookies перечитаны с диска и применены!', 'success');
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  $('btn-cookies-clear').addEventListener('click', async () => {
-    if (!confirm('Удалить файл data/cookies.txt и переключить YouTube на работу без cookies?')) {
-      return;
-    }
-    try {
-      const res = await api('/api/admin/cookies', { method: 'DELETE' });
-      renderCookiesStatus(res.status);
-      showToast('🗑️ Файл cookies.txt удалён', 'info');
-    } catch (err) {
-      showToast(err.message, 'error');
     }
   });
 

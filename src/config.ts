@@ -13,6 +13,7 @@ export interface Config {
   spotifyClientId: string;
   spotifyClientSecret: string;
   ytCookie: string;
+  botOwnerIds: string[];
 }
 
 function loadWorkerTokens(): string[] {
@@ -54,4 +55,8 @@ export const config: Config = {
   spotifyClientId: process.env.SPOTIFY_CLIENT_ID ?? '',
   spotifyClientSecret: process.env.SPOTIFY_CLIENT_SECRET ?? '',
   ytCookie: process.env.YT_COOKIE ?? '',
+  botOwnerIds: (process.env.BOT_OWNER_IDS ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => /^\d{15,22}$/.test(id)),
 };

@@ -285,50 +285,8 @@
         </div>
       </section>
 
-      <!-- ==================== ВКЛАДКА 4: НАСТРОЙКИ (АДМИН) ==================== -->
-      <section id="tab-admin" class="tab-panel">
-        <div class="card admin-card">
-          <h2>⚙️ Права доступа к веб-панели</h2>
-          <p class="muted">Выберите роль Discord, необходимую для управления очередью и саундбордом. Администраторы сервера имеют доступ всегда.</p>
-          <form id="admin-settings-form" class="admin-form">
-            <label for="required-role-select">Минимальная роль для доступа:</label>
-            <select id="required-role-select">
-              <option value="">🌐 Доступ открыт всем участникам сервера</option>
-            </select>
-            <button type="submit" class="btn btn-primary">💾 Сохранить настройки</button>
-          </form>
-        </div>
-
-        <div class="card admin-card">
-          <h2>🍪 YouTube Cookies (горячее обновление)</h2>
-          <p class="muted small" style="margin-bottom: 12px;">
-            Нужны на облачных серверах, если YouTube выдаёт ошибку <code>Sign in to confirm you're not a bot</code> или протухла старая сессия.
-            Экспортируйте <code>cookies.txt</code> в режиме Инкогнито со страницы <code>youtube.com/robots.txt</code> (и просто закройте вкладку без «Выйти»), затем загрузите его сюда — бот применит cookies мгновенно без перезапуска.
-          </p>
-
-          <div id="cookies-status" class="cookies-status">Загрузка статуса cookies...</div>
-
-          <div class="cookies-upload-row">
-            <label class="file-btn">
-              <span id="cookies-file-label">📄 Выбрать файл cookies.txt</span>
-              <input type="file" id="cookies-file" accept=".txt,text/plain" hidden />
-            </label>
-          </div>
-
-          <textarea
-            id="cookies-textarea"
-            class="cookies-textarea"
-            rows="6"
-            placeholder="Выберите файл cookies.txt выше или вставьте его содержимое сюда (формат Netscape HTTP Cookie File)..."
-          ></textarea>
-
-          <div class="btn-row">
-            <button type="button" id="btn-cookies-save" class="btn btn-primary">💾 Загрузить и применить</button>
-            <button type="button" id="btn-cookies-reload" class="btn btn-secondary">🔄 Перечитать с диска</button>
-            <button type="button" id="btn-cookies-clear" class="btn btn-danger">🗑️ Удалить cookies</button>
-          </div>
-        </div>
-      </section>
+      <!-- ==================== ВКЛАДКА 4: НАСТРОЙКИ (АДМИН — рендерится динамически только для админов) ==================== -->
+      <section id="tab-admin" class="tab-panel"></section>
     </main>
   </div>
 

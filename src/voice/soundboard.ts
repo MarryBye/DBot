@@ -7,6 +7,12 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { db, soundsDir } from '../db/index.js';
 import { sounds, type SoundRecord } from '../db/schema.js';
+import {
+  assertTrustedMyInstantsAudioUrl,
+  MYINSTANTS_ALLOWED_HOSTS,
+  readResponseBufferWithLimit,
+  safeFetch,
+} from '../web/security.js';
 
 export interface MemeSound {
   name: string;
@@ -15,8 +21,34 @@ export interface MemeSound {
   color: string;
 }
 
-const ALLOWED_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.webm', '.flac']);
+const SAFE_AUDIO_MIME_BY_EXT: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.webm': 'audio/webm',
+  '.flac': 'audio/flac',
+};
+
+const ALLOWED_EXTENSIONS = new Set(Object.keys(SAFE_AUDIO_MIME_BY_EXT));
 const MAX_SOUND_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_SOUNDS_PER_GUILD = 100;
+
+export function getSafeAudioMimeType(filename: string): string {
+  const ext = path.extname(filename || '').toLowerCase();
+  return SAFE_AUDIO_MIME_BY_EXT[ext] ?? 'audio/mpeg';
+}
+
+function looksLikeActiveWebDocument(buffer: Buffer): boolean {
+  const head = buffer.subarray(0, 512).toString('utf-8').trimStart().toLowerCase();
+  return (
+    head.startsWith('<!doctype') ||
+    head.startsWith('<html') ||
+    head.startsWith('<script') ||
+    head.startsWith('<svg') ||
+    head.startsWith('<?xml')
+  );
+}
 
 function decodeHtmlEntities(str: string): string {
   return str
@@ -166,7 +198,13 @@ export class SoundboardService {
   }
 
   public static getSoundFilePath(sound: SoundRecord): string {
-    return path.join(soundsDir, path.basename(sound.filename));
+    const safeName = path.basename(sound.filename);
+    const full = path.resolve(soundsDir, safeName);
+    const root = path.resolve(soundsDir);
+    if (!full.startsWith(root + path.sep)) {
+      throw new Error('Некорректный путь к аудиофайлу.');
+    }
+    return full;
   }
 
   public static async saveCustomSound(params: {
@@ -191,12 +229,18 @@ export class SoundboardService {
     if (params.buffer.length > MAX_SOUND_SIZE_BYTES) {
       throw new Error('Файл слишком большой (максимум 10 МБ).');
     }
+    if (looksLikeActiveWebDocument(params.buffer)) {
+      throw new Error('Загруженный файл не является аудиофайлом (обнаружен HTML/SVG/XML).');
+    }
 
     const rawExt = path.extname(params.originalFilename || '').toLowerCase() || '.mp3';
     const ext = ALLOWED_EXTENSIONS.has(rawExt) ? rawExt : '.mp3';
 
-    // Проверяем дубликат по имени (без учёта регистра)
+    // Проверяем лимит и дубликат по имени (без учёта регистра)
     const existing = await this.listCustomSounds(params.guildId);
+    if (existing.length >= MAX_SOUNDS_PER_GUILD) {
+      throw new Error(`Достигнут лимит звуков на сервере (${MAX_SOUNDS_PER_GUILD}).`);
+    }
     if (existing.some((s) => s.name.toLowerCase() === cleanName.toLowerCase())) {
       throw new Error(`Звук с названием "${cleanName}" уже существует.`);
     }
@@ -205,15 +249,8 @@ export class SoundboardService {
     const fullPath = path.join(soundsDir, safeFileName);
     await fs.promises.writeFile(fullPath, params.buffer);
 
-    const mimeType =
-      params.mimeType ||
-      (ext === '.wav'
-        ? 'audio/wav'
-        : ext === '.ogg'
-          ? 'audio/ogg'
-          : ext === '.webm'
-            ? 'audio/webm'
-            : 'audio/mpeg');
+    // НИКОГДА не доверяем client-supplied mimeType (защита от Stored XSS через text/html!)
+    const mimeType = getSafeAudioMimeType(safeFileName);
 
     const [inserted] = await db
       .insert(sounds)
@@ -241,21 +278,25 @@ export class SoundboardService {
     uploadedById: string;
     uploadedByTag: string;
   }): Promise<SoundRecord> {
-    const res = await fetch(params.url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    // Строго разрешаем только проверенные HTTPS аудиоссылки MyInstants (блокирует SSRF / IMDS!)
+    const validated = await assertTrustedMyInstantsAudioUrl(params.url);
+
+    const res = await safeFetch(validated.toString(), {
+      httpsOnly: true,
+      allowedHosts: MYINSTANTS_ALLOWED_HOSTS,
+      timeoutMs: 15_000,
+    });
     if (!res.ok) {
       throw new Error(`Не удалось скачать аудио (код ${res.status})`);
     }
-    const arrayBuf = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf);
-    const urlPath = new URL(params.url).pathname;
-    const filename = path.basename(urlPath) || 'sound.mp3';
+    const buffer = await readResponseBufferWithLimit(res, MAX_SOUND_SIZE_BYTES);
+    const filename = path.basename(validated.pathname) || 'sound.mp3';
 
     return this.saveCustomSound({
       guildId: params.guildId,
       name: params.name,
       buffer,
       originalFilename: filename,
-      mimeType: res.headers.get('content-type') || 'audio/mpeg',
       color: params.color,
       emoji: params.emoji || '😂',
       uploadedById: params.uploadedById,
