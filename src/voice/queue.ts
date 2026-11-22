@@ -1,9 +1,7 @@
-import {
-  AudioPlayerStatus,
-  AudioResource,
-} from '@discordjs/voice';
-import { MusicResolver, type PlayableResource, type Track } from './music-resolver.js';
-import { SoundboardService } from './soundboard.js';
+import { AudioPlayerStatus } from '@discordjs/voice';
+import { spawnPcmDecoder } from './ffmpeg.js';
+import { AudioMixer } from './mixer.js';
+import { MusicResolver, type Track } from './music-resolver.js';
 import type { VoiceWorker } from './worker-pool.js';
 
 export const IDLE_PLAYBACK_TIMEOUT_MS = 5 * 60 * 1000; // 5 минут без воспроизведения музыки
@@ -16,9 +14,9 @@ export interface SoundEffectPlayback {
 
 export class AudioQueue {
   public readonly worker: VoiceWorker;
+  public readonly mixer: AudioMixer;
   public tracks: Track[] = [];
   public currentTrack: Track | null = null;
-  public currentResource: AudioResource | null = null;
   public volume = 80;
   public loopMode: 'off' | 'track' | 'queue' = 'off';
   public isPaused = false;
@@ -29,60 +27,53 @@ export class AudioQueue {
   public activeSfxName: string | null = null;
 
   private idleTimeout: NodeJS.Timeout | null = null;
-  private sfxGuardTimeout: NodeJS.Timeout | null = null;
-  private currentCleanup: (() => void) | null = null;
-  private isPlayingSfx = false;
-  private musicWasPlayingBeforeSfx = false;
-  private suppressNextIdle = false;
 
   constructor(worker: VoiceWorker) {
     this.worker = worker;
+
+    this.mixer = new AudioMixer({
+      onMusicEnd: () => {
+        this.handleTrackEnd();
+      },
+      onSfxStateChange: (activeNames) => {
+        this.activeSfxName = activeNames.length > 0 ? activeNames[activeNames.length - 1] : null;
+        if (activeNames.length === 0 && (!this.currentTrack || this.isPaused)) {
+          this.startIdleTimer();
+        }
+        this.worker.notifyStateChange();
+      },
+    });
+
     this.setupPlayerEvents();
   }
 
   private setupPlayerEvents() {
-    this.worker.player.on(AudioPlayerStatus.Idle, () => {
-      if (this.suppressNextIdle) {
-        this.suppressNextIdle = false;
-        return;
-      }
-      this.handleTrackEnd();
-    });
-
     this.worker.player.on('error', (err) => {
-      console.error(`❌ [Queue #${this.worker.id}] Ошибка плеера:`, err);
+      console.error(`❌ [Queue #${this.worker.id}] Ошибка AudioPlayer:`, err.message);
+      this.mixer.stopAll();
       this.handleTrackEnd();
     });
 
-    // События отдельного плеера звуковых эффектов (саундборд)
-    this.worker.sfxPlayer.on(AudioPlayerStatus.Idle, () => {
-      if (this.isPlayingSfx) {
-        this.finishSoundEffect();
-      }
-    });
-
-    this.worker.sfxPlayer.on('error', (err) => {
-      console.error(`❌ [SFX #${this.worker.id}] Ошибка саундборда:`, err);
-      if (this.isPlayingSfx) {
-        this.finishSoundEffect();
+    this.worker.player.on(AudioPlayerStatus.Idle, () => {
+      // Если плеер перешёл в Idle, а музыка и SFX не играют — запускаем 5-мин таймер простоя
+      if (!this.currentTrack && this.mixer.activeSfxNames.length === 0) {
+        this.startIdleTimer();
+        this.worker.notifyStateChange();
       }
     });
   }
 
-  private cleanupCurrentStream() {
-    if (this.currentCleanup) {
-      try {
-        this.currentCleanup();
-      } catch {
-        // ignore
-      }
-      this.currentCleanup = null;
+  private ensureMixerPlaying() {
+    if (this.worker.connection) {
+      this.worker.connection.subscribe(this.worker.player);
+    }
+    const { resource, created } = this.mixer.ensureResource();
+    if (created) {
+      this.worker.player.play(resource);
     }
   }
 
   private handleTrackEnd() {
-    this.cleanupCurrentStream();
-    this.currentResource = null;
     this.startedAt = null;
     this.pausedAt = null;
     this.totalPausedMs = 0;
@@ -102,14 +93,15 @@ export class AudioQueue {
     } else {
       this.currentTrack = null;
       this.isPaused = false;
-      this.startIdleTimer();
+      if (this.mixer.activeSfxNames.length === 0) {
+        this.startIdleTimer();
+      }
       this.worker.notifyStateChange();
     }
   }
 
   public async play(track: Track): Promise<void> {
     this.clearIdleTimer();
-    this.cleanupCurrentStream();
 
     this.currentTrack = track;
     this.isPaused = false;
@@ -117,21 +109,12 @@ export class AudioQueue {
     this.totalPausedMs = 0;
 
     try {
-      const playable: PlayableResource = await MusicResolver.createAudioResourceForTrack(
-        track,
-        this.volume
-      );
+      const pcmHandle = await MusicResolver.createPcmSourceForTrack(track);
+      this.mixer.setVolume(this.volume);
+      this.mixer.setMusic(track.title, pcmHandle);
+      this.ensureMixerPlaying();
 
-      this.currentResource = playable.resource;
-      this.currentCleanup = playable.cleanup;
       this.startedAt = Date.now();
-
-      // Если не играет SFX, убеждаемся что подключение подписано на музыкальный плеер
-      if (!this.isPlayingSfx && this.worker.connection) {
-        this.worker.connection.subscribe(this.worker.player);
-      }
-
-      this.worker.player.play(playable.resource);
       this.worker.notifyStateChange();
     } catch (err) {
       console.error(`❌ [Queue #${this.worker.id}] Ошибка старта трека "${track.title}":`, err);
@@ -146,7 +129,6 @@ export class AudioQueue {
     const toAdd = Array.isArray(trackOrTracks) ? trackOrTracks : [trackOrTracks];
     if (toAdd.length === 0) return { position: 0, isPlayingNow: false, addedCount: 0 };
 
-    // Если сейчас ничего не играет
     if (!this.currentTrack && this.tracks.length === 0) {
       const [first, ...rest] = toAdd;
       this.tracks.push(...rest);
@@ -170,21 +152,20 @@ export class AudioQueue {
     }
 
     const skipped = this.currentTrack;
-    // При ручном skip в режиме track loop — переходим к следующему треку
     if (this.loopMode === 'track') {
       this.currentTrack = null;
     }
-    this.worker.player.stop(true);
-    this.worker.notifyStateChange();
+
+    this.mixer.clearMusic();
+    this.handleTrackEnd();
     return skipped;
   }
 
   public pause(): boolean {
     if (this.isPaused || !this.currentTrack) return false;
-    this.worker.player.pause();
+    this.mixer.pauseMusic();
     this.isPaused = true;
     this.pausedAt = Date.now();
-    // 5 минут без музыки (в паузе) -> автовыход
     this.startIdleTimer();
     this.worker.notifyStateChange();
     return true;
@@ -198,9 +179,7 @@ export class AudioQueue {
     }
     this.isPaused = false;
     this.clearIdleTimer();
-    if (!this.isPlayingSfx) {
-      this.worker.player.unpause();
-    }
+    this.mixer.resumeMusic();
     this.worker.notifyStateChange();
     return true;
   }
@@ -236,107 +215,39 @@ export class AudioQueue {
   }
 
   /**
-   * Проигрывание звука саундборда (мем с MyInstants или загруженный файл).
-   * Аккуратно ставит музыку на микро-паузу на время звука, затем продолжает с того же места!
+   * Проигрывание звука саундборда ПОВЕРХ текущей музыки!
+   * AudioMixer плавно приглушает музыку до 18%, накладывает мем на полной громкости,
+   * а после завершения мема плавно возвращает громкость музыки обратно.
    */
   public async playSoundEffect(effect: SoundEffectPlayback): Promise<void> {
     if (!this.worker.connection) {
       throw new Error('Воркер не подключен к голосовому каналу.');
     }
 
-    const resource = effect.filePath
-      ? await SoundboardService.createResourceFromFile(effect.filePath, this.volume)
-      : effect.url
-        ? await SoundboardService.createResourceFromUrl(effect.url, this.volume)
-        : null;
-
-    if (!resource) {
+    const sourceInput = effect.filePath || effect.url;
+    if (!sourceInput) {
       throw new Error('Не указан источник звука.');
     }
 
     this.clearIdleTimer();
-    if (this.sfxGuardTimeout) {
-      clearTimeout(this.sfxGuardTimeout);
-      this.sfxGuardTimeout = null;
-    }
-
-    // Запоминаем состояние музыки только если это не повторный клик поверх уже идущего SFX
-    if (!this.isPlayingSfx) {
-      this.musicWasPlayingBeforeSfx =
-        this.currentTrack !== null &&
-        !this.isPaused &&
-        this.worker.player.state.status === AudioPlayerStatus.Playing;
-
-      if (this.musicWasPlayingBeforeSfx) {
-        this.worker.player.pause();
-        this.pausedAt = Date.now();
-      }
-    }
-
-    this.isPlayingSfx = true;
-    this.activeSfxName = effect.name;
-
-    this.worker.connection.subscribe(this.worker.sfxPlayer);
-    this.worker.sfxPlayer.play(resource);
-    this.worker.notifyStateChange();
-
-    // Предохранитель на случай зависшего потока (макс. 45 сек)
-    this.sfxGuardTimeout = setTimeout(() => {
-      if (this.isPlayingSfx) {
-        this.worker.sfxPlayer.stop(true);
-        this.finishSoundEffect();
-      }
-    }, 45_000);
-  }
-
-  private finishSoundEffect() {
-    if (this.sfxGuardTimeout) {
-      clearTimeout(this.sfxGuardTimeout);
-      this.sfxGuardTimeout = null;
-    }
-
-    this.isPlayingSfx = false;
-    this.activeSfxName = null;
-
-    if (this.worker.connection) {
-      this.worker.connection.subscribe(this.worker.player);
-    }
-
-    if (this.musicWasPlayingBeforeSfx && !this.isPaused && this.currentTrack) {
-      if (this.pausedAt) {
-        this.totalPausedMs += Date.now() - this.pausedAt;
-        this.pausedAt = null;
-      }
-      this.worker.player.unpause();
-    } else if (!this.currentTrack || this.isPaused) {
-      this.startIdleTimer();
-    }
-
-    this.musicWasPlayingBeforeSfx = false;
-    this.worker.notifyStateChange();
+    const pcmHandle = spawnPcmDecoder(sourceInput);
+    this.mixer.setVolume(this.volume);
+    this.mixer.addSfx(effect.name, pcmHandle);
+    this.ensureMixerPlaying();
   }
 
   public resetStateWithoutLeaving(): void {
     this.clearIdleTimer();
-    if (this.sfxGuardTimeout) {
-      clearTimeout(this.sfxGuardTimeout);
-      this.sfxGuardTimeout = null;
-    }
-    this.cleanupCurrentStream();
     this.tracks = [];
     this.currentTrack = null;
-    this.currentResource = null;
     this.isPaused = false;
     this.startedAt = null;
     this.pausedAt = null;
     this.totalPausedMs = 0;
     this.loopMode = 'off';
-    this.isPlayingSfx = false;
     this.activeSfxName = null;
-    this.musicWasPlayingBeforeSfx = false;
-    this.suppressNextIdle = true;
+    this.mixer.stopAll();
     this.worker.player.stop(true);
-    this.worker.sfxPlayer.stop(true);
   }
 
   public stop(): void {
@@ -345,11 +256,8 @@ export class AudioQueue {
   }
 
   public setVolume(vol: number): number {
-    const clamped = Math.max(1, Math.min(100, Math.round(vol)));
+    const clamped = this.mixer.setVolume(vol);
     this.volume = clamped;
-    if (this.currentResource?.volume) {
-      this.currentResource.volume.setVolume(clamped / 100);
-    }
     this.worker.notifyStateChange();
     return clamped;
   }

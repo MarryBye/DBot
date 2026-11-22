@@ -59,7 +59,6 @@ export class VoiceWorker {
   public readonly token: string;
   public client: Client;
   public player: AudioPlayer;
-  public sfxPlayer: AudioPlayer;
   public queue: AudioQueue;
   public connection: VoiceConnection | null = null;
   public currentGuildId: string | null = null;
@@ -86,12 +85,6 @@ export class VoiceWorker {
     this.player = createAudioPlayer({
       behaviors: {
         noSubscriber: NoSubscriberBehavior.Pause,
-      },
-    });
-
-    this.sfxPlayer = createAudioPlayer({
-      behaviors: {
-        noSubscriber: NoSubscriberBehavior.Stop,
       },
     });
 

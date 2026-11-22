@@ -1,15 +1,10 @@
-import {
-  AudioResource,
-  createAudioResource,
-  StreamType,
-} from '@discordjs/voice';
 import { Ytdl } from '@distube/ytdl-core';
-import ffmpegStatic from 'ffmpeg-static';
-import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
-import { Readable } from 'node:stream';
-import type { ReadableStream as WebReadableStream } from 'node:stream/web';
+import fs from 'node:fs';
+import path from 'node:path';
 import { config } from '../config.js';
+import { dataDir } from '../db/index.js';
+import { spawnPcmDecoder, type PcmDecoderHandle } from './ffmpeg.js';
 
 export type PlatformOption = 'auto' | 'youtube' | 'soundcloud' | 'spotify';
 
@@ -34,11 +29,6 @@ export interface Track {
   };
 }
 
-export interface PlayableResource {
-  resource: AudioResource;
-  cleanup: () => void;
-}
-
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
   const h = Math.floor(seconds / 3600);
@@ -58,7 +48,6 @@ export function parsePlatformFromPrefixArgs(args: string[]): {
 
   const first = args[0].toLowerCase();
 
-  // Поддержка слитного формата: yt:название, sc:название, sp:название
   const prefixMatch = first.match(/^(yt|youtube|sc|soundcloud|sp|spotify):(.*)$/);
   if (prefixMatch) {
     const platKey = prefixMatch[1];
@@ -73,7 +62,6 @@ export function parsePlatformFromPrefixArgs(args: string[]): {
     return { platform, query };
   }
 
-  // Поддержка раздельного формата: +play sc phonk (только если есть сам запрос после платформы)
   if (args.length >= 2) {
     if (first === 'yt' || first === 'youtube') {
       return { platform: 'youtube', query: args.slice(1).join(' ').trim() };
@@ -93,7 +81,47 @@ function makeUid(): string {
   return crypto.randomBytes(6).toString('hex');
 }
 
-const ytdl = new Ytdl();
+function cleanTrackQueryForFallback(title: string, author?: string): string {
+  const cleanedTitle = title
+    .replace(/\((?:official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics|4k\s*remaster|hd|hq|mv|visualizer|audio)[^)]*\)/gi, '')
+    .replace(/\[(?:official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics|4k|hd|hq|mv|audio)[^\]]*\]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (
+    author &&
+    author !== 'YouTube' &&
+    author !== 'Spotify' &&
+    author !== 'SoundCloud' &&
+    !cleanedTitle.toLowerCase().includes(author.toLowerCase())
+  ) {
+    return `${author} ${cleanedTitle}`.trim();
+  }
+  return cleanedTitle || title;
+}
+
+function loadYouTubeCookie(): string | undefined {
+  // 1. Проверяем файл data/cookies.txt (экспорт Netscape из браузера)
+  const cookieFilePath = path.join(dataDir, 'cookies.txt');
+  if (fs.existsSync(cookieFilePath)) {
+    const content = fs.readFileSync(cookieFilePath, 'utf-8').trim();
+    if (content.length > 20) {
+      console.log('🍪 [YouTube] Загружены cookies из data/cookies.txt');
+      return content;
+    }
+  }
+
+  // 2. Или переменная окружения YT_COOKIE в .env
+  if (config.ytCookie && config.ytCookie.trim().length > 10) {
+    console.log('🍪 [YouTube] Загружены cookies из YT_COOKIE (.env)');
+    return config.ytCookie.trim();
+  }
+
+  return undefined;
+}
+
+const initialCookie = loadYouTubeCookie();
+const ytdl = new Ytdl(initialCookie ? { cookie: initialCookie } : undefined);
 
 // ========================================================
 // Внутренний клиент SoundCloud API v2 (без сторонних пакетов)
@@ -152,7 +180,7 @@ class SoundCloudClient {
     return res.json();
   }
 
-  public static async searchTracks(query: string, limit = 5): Promise<any[]> {
+  public static async searchTracks(query: string, limit = 8): Promise<any[]> {
     const data = await this.apiGet(
       `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(query)}&limit=${limit}`
     );
@@ -171,6 +199,30 @@ class SoundCloudClient {
     return data.url;
   }
 
+  public static pickPlayableTranscoding(raw: any): {
+    url: string;
+    protocol: 'progressive' | 'hls';
+  } | null {
+    const isSnipOnly = raw.policy === 'SNIP' || raw.monetization_model === 'SUB_HIGH_TIER';
+    if (isSnipOnly) return null;
+
+    const transcodings: any[] = Array.isArray(raw.media?.transcodings)
+      ? raw.media.transcodings
+      : [];
+
+    const progressive = transcodings.find(
+      (t) => t?.format?.protocol === 'progressive' && !t?.snipped
+    );
+    const hls = transcodings.find((t) => t?.format?.protocol === 'hls' && !t?.snipped);
+    const chosen = progressive ?? hls;
+    if (!chosen?.url) return null;
+
+    return {
+      url: chosen.url,
+      protocol: chosen.format?.protocol === 'progressive' ? 'progressive' : 'hls',
+    };
+  }
+
   public static mapRawTrack(
     raw: any,
     requestedBy: { id: string; tag: string }
@@ -182,17 +234,7 @@ class SoundCloudClient {
       ? String(raw.artwork_url).replace('-large.', '-t500x500.')
       : raw.user?.avatar_url ?? null;
 
-    // Если трек Go+ (policy === 'SNIP' / preview 30с), лучше найти полную версию на YouTube
-    const isSnipOnly = raw.policy === 'SNIP' || raw.monetization_model === 'SUB_HIGH_TIER';
-    const transcodings: any[] = Array.isArray(raw.media?.transcodings)
-      ? raw.media.transcodings
-      : [];
-
-    const progressive = transcodings.find(
-      (t) => t?.format?.protocol === 'progressive' && !t?.snipped
-    );
-    const hls = transcodings.find((t) => t?.format?.protocol === 'hls' && !t?.snipped);
-    const chosen = !isSnipOnly ? progressive ?? hls : null;
+    const chosen = this.pickPlayableTranscoding(raw);
 
     return {
       uid: makeUid(),
@@ -208,9 +250,31 @@ class SoundCloudClient {
       source: 'soundcloud',
       streamKind: chosen ? 'soundcloud-direct' : 'youtube',
       soundcloudTranscodingUrl: chosen?.url,
-      soundcloudProtocol: chosen?.format?.protocol === 'progressive' ? 'progressive' : 'hls',
+      soundcloudProtocol: chosen?.protocol,
       requestedBy,
     };
+  }
+
+  /**
+   * Ищет на SoundCloud полный (не Go+ SNIP) поток для любого трека — используется как
+   * мгновенный фолбэк, если YouTube заблокировал IP облачного сервера ("Sign in to confirm you're not a bot").
+   */
+  public static async findDirectStreamForQuery(query: string): Promise<string | null> {
+    const candidates = await this.searchTracks(query, 8);
+    for (const raw of candidates) {
+      const picked = this.pickPlayableTranscoding(raw);
+      if (picked) {
+        return this.fetchMediaStreamUrl(picked.url);
+      }
+    }
+    // Если нашлись только любые треки с transcodings (даже без фильтрации) — пробуем первый рабочий
+    for (const raw of candidates) {
+      const t = raw?.media?.transcodings?.[0];
+      if (t?.url) {
+        return this.fetchMediaStreamUrl(t.url);
+      }
+    }
+    return null;
   }
 }
 
@@ -251,7 +315,6 @@ class SpotifyClient {
     query: string,
     requestedBy: { id: string; tag: string }
   ): Promise<Track | null> {
-    // 1. Если настроены ключи Spotify API — ищем напрямую в Spotify
     const token = await this.getAppToken();
     if (token) {
       const res = await fetch(
@@ -271,7 +334,7 @@ class SpotifyClient {
             author: artists,
             url: '',
             originalUrl: item.external_urls?.spotify ?? 'https://open.spotify.com',
-            searchQuery: `${artists} - ${item.name} audio`,
+            searchQuery: `${artists} - ${item.name}`,
             durationSec,
             durationFormatted: formatDuration(durationSec),
             thumbnail: item.album?.images?.[0]?.url ?? null,
@@ -283,7 +346,6 @@ class SpotifyClient {
       }
     }
 
-    // 2. Без ключей Spotify используем открытый каталог Deezer для точных метаданных студийного трека
     try {
       const dzRes = await fetch(
         `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=1`
@@ -302,7 +364,7 @@ class SpotifyClient {
             author: artist,
             url: '',
             originalUrl: item.link ?? 'https://open.spotify.com',
-            searchQuery: `${artist} - ${title} audio`,
+            searchQuery: `${artist} - ${title}`,
             durationSec,
             durationFormatted: formatDuration(durationSec),
             thumbnail: item.album?.cover_big ?? item.album?.cover_medium ?? null,
@@ -313,7 +375,7 @@ class SpotifyClient {
         }
       }
     } catch {
-      // Фолбэк ниже
+      // ignore
     }
 
     return null;
@@ -357,7 +419,7 @@ class SpotifyClient {
                   author: artists,
                   url: '',
                   originalUrl: url,
-                  searchQuery: `${artists} - ${entity.name} audio`,
+                  searchQuery: `${artists} - ${entity.name}`,
                   durationSec,
                   durationFormatted: formatDuration(durationSec),
                   thumbnail: cover,
@@ -385,7 +447,7 @@ class SpotifyClient {
                   author: artist,
                   url: '',
                   originalUrl: trackId.length === 22 ? `https://open.spotify.com/track/${trackId}` : url,
-                  searchQuery: `${artist} - ${title} audio`,
+                  searchQuery: `${artist} - ${title}`,
                   durationSec,
                   durationFormatted: formatDuration(durationSec),
                   thumbnail: cover,
@@ -402,7 +464,6 @@ class SpotifyClient {
       }
     }
 
-    // Фолбэк на oEmbed
     const res = await fetch(
       `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`
     );
@@ -419,7 +480,7 @@ class SpotifyClient {
         author: 'Spotify',
         url: '',
         originalUrl: url,
-        searchQuery: `${data.title} audio`,
+        searchQuery: data.title,
         durationSec: 0,
         durationFormatted: '0:00',
         thumbnail: data.thumbnail_url ?? null,
@@ -444,7 +505,6 @@ export class MusicResolver {
 
     const isUrl = /^https?:\/\//i.test(trimmed);
 
-    // 1. Прямые ссылки всегда определяются автоматически по домену
     if (isUrl) {
       if (trimmed.includes('open.spotify.com/')) {
         return SpotifyClient.resolveUrl(trimmed, requestedBy);
@@ -462,7 +522,6 @@ export class MusicResolver {
       throw new Error('Неподдерживаемая ссылка. Поддерживаются YouTube, Spotify и SoundCloud.');
     }
 
-    // 2. Текстовый поиск по выбранной платформе
     if (platform === 'soundcloud') {
       return this.searchSoundCloud(trimmed, requestedBy);
     }
@@ -470,7 +529,6 @@ export class MusicResolver {
     if (platform === 'spotify') {
       const spTrack = await SpotifyClient.searchTrackByName(trimmed, requestedBy);
       if (spTrack) return [spTrack];
-      // Фолбэк на YouTube, если каталог не ответил
       return this.searchYouTube(trimmed, requestedBy);
     }
 
@@ -478,7 +536,7 @@ export class MusicResolver {
       return this.searchYouTube(trimmed, requestedBy);
     }
 
-    // 3. Режим AUTO: пробуем YouTube, при ошибке/пустом результате автоматически фолбэк на SoundCloud
+    // Режим AUTO: пробуем YouTube, при ошибке автоматически фолбэк на SoundCloud
     try {
       const ytTracks = await this.searchYouTube(trimmed, requestedBy);
       if (ytTracks.length > 0) return ytTracks;
@@ -493,13 +551,12 @@ export class MusicResolver {
     query: string,
     requestedBy: { id: string; tag: string }
   ): Promise<Track[]> {
-    const tracks = await SoundCloudClient.searchTracks(query, 5);
+    const tracks = await SoundCloudClient.searchTracks(query, 8);
     if (!tracks.length) {
       throw new Error(`На SoundCloud ничего не найдено по запросу "${query}".`);
     }
-    // Предпочитаем полные треки (не SNIP/Go+ превью)
     const best =
-      tracks.find((t) => t.policy !== 'SNIP' && t.media?.transcodings?.length > 0) ?? tracks[0];
+      tracks.find((t) => SoundCloudClient.pickPlayableTranscoding(t) !== null) ?? tracks[0];
     return [SoundCloudClient.mapRawTrack(best, requestedBy)];
   }
 
@@ -525,7 +582,6 @@ export class MusicResolver {
       console.warn('⚠️ SoundCloud API v2 resolve fallback to oEmbed:', err);
     }
 
-    // Фолбэк на oEmbed
     const res = await fetch(
       `https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(url)}`
     );
@@ -560,8 +616,10 @@ export class MusicResolver {
     url: string,
     requestedBy: { id: string; tag: string }
   ): Promise<Track[]> {
-    // Проверяем явный плейлист YouTube
-    if (url.includes('/playlist?list=') || (url.includes('list=') && !url.includes('watch?v=') && !url.includes('youtu.be/'))) {
+    if (
+      url.includes('/playlist?list=') ||
+      (url.includes('list=') && !url.includes('watch?v=') && !url.includes('youtu.be/'))
+    ) {
       try {
         const playlist = await ytdl.getPlaylist(url);
         const items = playlist?.videos ?? [];
@@ -589,26 +647,59 @@ export class MusicResolver {
       }
     }
 
-    const info = await ytdl.getInfo(url);
-    const details = info.videoDetails;
-    const durationSec = Number(details.lengthSeconds ?? 0);
+    // Пробуем ytdl.getInfo, если YouTube заблокировал IP — вытаскиваем метаданные через открытый YouTube oEmbed!
+    try {
+      const info = await ytdl.getInfo(url);
+      const details = info.videoDetails;
+      const durationSec = Number(details.lengthSeconds ?? 0);
 
-    return [
-      {
-        uid: makeUid(),
-        id: details.id,
-        title: details.title,
-        author: details.author?.name ?? 'YouTube',
-        url: details.url || url,
-        originalUrl: url,
-        durationSec,
-        durationFormatted: formatDuration(durationSec),
-        thumbnail: details.thumbnails?.[0]?.url ?? null,
-        source: 'youtube',
-        streamKind: 'youtube',
-        requestedBy,
-      },
-    ];
+      return [
+        {
+          uid: makeUid(),
+          id: details.id,
+          title: details.title,
+          author: details.author?.name ?? 'YouTube',
+          url: details.url || url,
+          originalUrl: url,
+          durationSec,
+          durationFormatted: formatDuration(durationSec),
+          thumbnail: details.thumbnails?.[0]?.url ?? null,
+          source: 'youtube',
+          streamKind: 'youtube',
+          requestedBy,
+        },
+      ];
+    } catch (ytErr) {
+      console.warn('⚠️ YouTube getInfo заблокирован, беру метаданные через oEmbed:', ytErr);
+      const oeRes = await fetch(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`
+      );
+      if (!oeRes.ok) {
+        throw new Error('Не удалось получить информацию о видео YouTube.');
+      }
+      const oe = (await oeRes.json()) as {
+        title: string;
+        author_name?: string;
+        thumbnail_url?: string;
+      };
+      return [
+        {
+          uid: makeUid(),
+          id: makeUid(),
+          title: oe.title,
+          author: oe.author_name ?? 'YouTube',
+          url,
+          originalUrl: url,
+          searchQuery: cleanTrackQueryForFallback(oe.title, oe.author_name),
+          durationSec: 0,
+          durationFormatted: '0:00',
+          thumbnail: oe.thumbnail_url ?? null,
+          source: 'youtube',
+          streamKind: 'youtube',
+          requestedBy,
+        },
+      ];
+    }
   }
 
   private static async searchYouTube(
@@ -642,114 +733,69 @@ export class MusicResolver {
   }
 
   /**
-   * Создаёт готовый AudioResource для трека (поддерживает ленивое разрешение URL, SoundCloud direct/HLS и YouTube).
+   * Создаёт декодированный PCM-поток (48kHz stereo s16le) для AudioMixer.
+   * Если YouTube отклоняет IP облачного сервера ("Sign in to confirm you're not a bot"),
+   * мгновенно и незаметно переключается на прямой поток SoundCloud!
    */
-  public static async createAudioResourceForTrack(
-    track: Track,
-    volumePercent: number
-  ): Promise<PlayableResource> {
-    // 1. Попытка прямого стриминга SoundCloud (если доступно)
+  public static async createPcmSourceForTrack(track: Track): Promise<PcmDecoderHandle> {
+    // 1. Прямой стриминг с SoundCloud (если трек уже с SoundCloud)
     if (track.streamKind === 'soundcloud-direct' && track.soundcloudTranscodingUrl) {
       try {
         const mediaUrl = await SoundCloudClient.fetchMediaStreamUrl(
           track.soundcloudTranscodingUrl
         );
+        return spawnPcmDecoder(mediaUrl);
+      } catch (scErr) {
+        console.warn(`⚠️ Прямой поток SoundCloud не сработал для "${track.title}":`, scErr);
+      }
+    }
 
-        if (track.soundcloudProtocol === 'progressive') {
-          const res = await fetch(mediaUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-          if (res.ok && res.body) {
-            const nodeStream = Readable.fromWeb(res.body as unknown as WebReadableStream);
-            const resource = createAudioResource(nodeStream, { inlineVolume: true });
-            resource.volume?.setVolume(volumePercent / 100);
-            return {
-              resource,
-              cleanup: () => {
-                nodeStream.destroy();
-              },
-            };
+    // 2. Попытка воспроизведения через YouTube
+    try {
+      let playableUrl = track.url;
+      if (!playableUrl || (!playableUrl.includes('youtube.com') && !playableUrl.includes('youtu.be'))) {
+        const q = track.searchQuery || `${track.author} - ${track.title}`;
+        const results = await ytdl.search(q);
+        const best = results[0];
+        if (best) {
+          playableUrl = best.url;
+          track.url = best.url;
+          if (track.durationSec <= 0 && best.lengthSeconds) {
+            track.durationSec = Number(best.lengthSeconds);
+            track.durationFormatted = formatDuration(track.durationSec);
           }
-        } else {
-          const ffmpegBin: string | null =
-            typeof ffmpegStatic === 'string'
-              ? ffmpegStatic
-              : ((ffmpegStatic as unknown as { default?: string })?.default ?? null);
-          if (ffmpegBin) {
-          // HLS (.m3u8) декодируем напрямую через ffmpeg-static в raw PCM 48kHz stereo
-          const proc: ChildProcess = spawn(
-            ffmpegBin,
-            [
-              '-reconnect', '1',
-              '-reconnect_streamed', '1',
-              '-reconnect_delay_max', '5',
-              '-i', mediaUrl,
-              '-analyzeduration', '0',
-              '-loglevel', '0',
-              '-f', 's16le',
-              '-ar', '48000',
-              '-ac', '2',
-              'pipe:1',
-            ],
-            { stdio: ['ignore', 'pipe', 'ignore'] }
-          );
-
-          if (proc.stdout) {
-            const resource = createAudioResource(proc.stdout, {
-              inputType: StreamType.Raw,
-              inlineVolume: true,
-            });
-            resource.volume?.setVolume(volumePercent / 100);
-            return {
-              resource,
-              cleanup: () => {
-                if (!proc.killed) proc.kill('SIGKILL');
-              },
-            };
-          }
+          if (!track.thumbnail && best.thumbnails?.[0]?.url) {
+            track.thumbnail = best.thumbnails[0].url;
           }
         }
-      } catch (scErr) {
-        console.warn(
-          `⚠️ Прямой поток SoundCloud недоступен для "${track.title}", переключаюсь на YouTube:`,
-          scErr
-        );
       }
+
+      if (playableUrl) {
+        // Сначала явно проверяем getInfo — чтобы сразу поймать "Sign in to confirm you're not a bot"!
+        const info = await ytdl.getInfo(playableUrl);
+        const rawStream = ytdl.download(info, {
+          filter: { hasAudio: true, hasVideo: false },
+          highWaterMark: 1 << 25,
+        });
+        return spawnPcmDecoder(rawStream);
+      }
+    } catch (ytErr: any) {
+      console.warn(
+        `⚠️ YouTube недоступен для "${track.title}" (${ytErr?.message ?? ytErr}) — пробую фолбэк через SoundCloud...`
+      );
     }
 
-    // 2. Ленивый поиск на YouTube (для треков Spotify / плейлистов / фолбэка SoundCloud)
-    let playableUrl = track.url;
-    if (!playableUrl || !playableUrl.includes('youtube.com') && !playableUrl.includes('youtu.be')) {
-      const q = track.searchQuery || `${track.author} - ${track.title}`;
-      const results = await ytdl.search(q);
-      const best = results[0];
-      if (!best) {
-        throw new Error(`Не удалось найти аудиопоток для "${track.title}"`);
-      }
-      playableUrl = best.url;
-      track.url = best.url;
-      if (track.durationSec <= 0 && best.lengthSeconds) {
-        track.durationSec = Number(best.lengthSeconds);
-        track.durationFormatted = formatDuration(track.durationSec);
-      }
-      if (!track.thumbnail && best.thumbnails?.[0]?.url) {
-        track.thumbnail = best.thumbnails[0].url;
-      }
+    // 3. Автоматический фолбэк на SoundCloud API v2 (не блокирует IP Oracle Cloud!)
+    const fallbackQuery =
+      track.searchQuery || cleanTrackQueryForFallback(track.title, track.author);
+    const scMediaUrl = await SoundCloudClient.findDirectStreamForQuery(fallbackQuery);
+    if (scMediaUrl) {
+      console.log(`🟠 [Fallback] Воспроизвожу "${track.title}" через SoundCloud!`);
+      return spawnPcmDecoder(scMediaUrl);
     }
 
-    const rawStream = await ytdl.download(playableUrl, {
-      filter: { hasAudio: true, hasVideo: false },
-      highWaterMark: 1 << 25,
-    });
-
-    const resource = createAudioResource(rawStream, {
-      inlineVolume: true,
-    });
-    resource.volume?.setVolume(volumePercent / 100);
-
-    return {
-      resource,
-      cleanup: () => {
-        rawStream.destroy();
-      },
-    };
+    throw new Error(
+      `YouTube заблокировал IP сервера для "${track.title}", а на SoundCloud аналог не найден. Добавьте data/cookies.txt (YouTube cookies) для полного доступа к YouTube.`
+    );
   }
 }

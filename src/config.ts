@@ -12,6 +12,7 @@ export interface Config {
   publicUrl: string;
   spotifyClientId: string;
   spotifyClientSecret: string;
+  ytCookie: string;
 }
 
 function loadWorkerTokens(): string[] {
@@ -52,4 +53,5 @@ export const config: Config = {
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/+$/, ''),
   spotifyClientId: process.env.SPOTIFY_CLIENT_ID ?? '',
   spotifyClientSecret: process.env.SPOTIFY_CLIENT_SECRET ?? '',
+  ytCookie: process.env.YT_COOKIE ?? '',
 };
