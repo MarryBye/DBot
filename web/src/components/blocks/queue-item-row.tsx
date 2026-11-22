@@ -1,5 +1,5 @@
 import type { TranslateFn } from '@/i18n';
-import type { TrackItem } from '@/types/api';
+import type { FavoriteTrackInput, TrackItem } from '@/types/api';
 import { cn } from '@/utils/cn';
 import { safeHttpUrl } from '@/utils/format';
 import { Button } from '@/components/ui/button';
@@ -8,12 +8,15 @@ import { Icon } from '@/components/ui/icon';
 import { PlatformBadge } from '@/components/ui/platform-badge';
 import { TrackThumbnail } from '@/components/ui/track-thumbnail';
 import { TruncatedText } from '@/components/ui/truncated-text';
+import { TrackQuickActions } from './track-quick-actions';
 
 export interface QueueItemRowProps {
   track: TrackItem;
   index: number;
   totalCount: number;
   canControl: boolean;
+  isFavorite: boolean;
+  isInPlaylist: boolean;
   isDragging: boolean;
   isDragOver: boolean;
   t: TranslateFn;
@@ -22,6 +25,8 @@ export interface QueueItemRowProps {
   onMoveUp: (index: number) => void;
   onMoveDown: (index: number) => void;
   onRemove: (index: number) => void;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
   onOpenLink: (url: string) => void;
   onCopyLink: (url: string) => void;
   onDragStart: (index: number) => void;
@@ -35,6 +40,8 @@ export function QueueItemRow({
   index,
   totalCount,
   canControl,
+  isFavorite,
+  isInPlaylist,
   isDragging,
   isDragOver,
   t,
@@ -43,6 +50,8 @@ export function QueueItemRow({
   onMoveUp,
   onMoveDown,
   onRemove,
+  onToggleFavorite,
+  onAddToPlaylist,
   onOpenLink,
   onCopyLink,
   onDragStart,
@@ -52,6 +61,18 @@ export function QueueItemRow({
 }: QueueItemRowProps) {
   const safeLink = safeHttpUrl(track.originalUrl || track.url);
   const titleText = track.title || track.originalUrl;
+  const favoritePayload: FavoriteTrackInput = {
+    id: track.id,
+    title: track.title,
+    author: track.author,
+    url: track.url,
+    originalUrl: track.originalUrl,
+    durationSec: track.durationSec,
+    durationFormatted: track.durationFormatted,
+    thumbnail: track.thumbnail,
+    source: track.source,
+    mediaKind: track.mediaKind,
+  };
 
   const menuItems: ContextMenuItem[] = [
     {
@@ -82,13 +103,25 @@ export function QueueItemRow({
       disabled: !canControl || index === totalCount - 1,
       onSelect: () => onMoveDown(index),
     },
+    {
+      id: 'favorite',
+      label: isFavorite ? t('favorites.remove') : t('favorites.add'),
+      icon: 'heart',
+      separatorBefore: true,
+      onSelect: () => onToggleFavorite(favoritePayload),
+    },
+    {
+      id: 'add-to-playlist',
+      label: t('playlists.addTrackAction'),
+      icon: 'list-plus',
+      onSelect: () => onAddToPlaylist(favoritePayload),
+    },
     ...(safeLink
       ? [
           {
             id: 'open-link',
             label: t('ctx.openLink'),
             icon: 'external-link' as const,
-            separatorBefore: true,
             onSelect: () => onOpenLink(safeLink),
           },
           {
@@ -161,7 +194,15 @@ export function QueueItemRow({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <TrackQuickActions
+            track={favoritePayload}
+            isFavorite={isFavorite}
+            isInPlaylist={isInPlaylist}
+            t={t}
+            onToggleFavorite={onToggleFavorite}
+            onAddToPlaylist={onAddToPlaylist}
+          />
           <Button
             variant="ghost"
             size="icon-sm"

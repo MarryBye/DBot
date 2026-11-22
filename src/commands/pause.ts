@@ -1,4 +1,5 @@
 import { GuildMember, SlashCommandBuilder } from 'discord.js';
+import { actorFromDiscord, AuditLogService, toAuditTrack } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import type { Command } from '../types.js';
 
@@ -28,6 +29,16 @@ export const command: Command = {
     }
 
     if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: member.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(interaction.user, member),
+        source: 'discord',
+        action: 'pause',
+        tracks: worker.queue.currentTrack ? [toAuditTrack(worker.queue.currentTrack)] : [],
+      });
       workerPool.emitActivity({
         guildId: worker.currentGuildId,
         channelId: worker.currentChannelId,
@@ -53,6 +64,16 @@ export const command: Command = {
     }
 
     if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: message.member?.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(message.author, message.member),
+        source: 'discord',
+        action: 'pause',
+        tracks: worker.queue.currentTrack ? [toAuditTrack(worker.queue.currentTrack)] : [],
+      });
       workerPool.emitActivity({
         guildId: worker.currentGuildId,
         channelId: worker.currentChannelId,

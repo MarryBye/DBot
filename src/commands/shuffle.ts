@@ -1,4 +1,5 @@
 import { GuildMember, SlashCommandBuilder } from 'discord.js';
+import { actorFromDiscord, AuditLogService } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import type { Command } from '../types.js';
 
@@ -20,6 +21,16 @@ export const command: Command = {
 
     const count = worker.queue.shuffle();
     if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: member.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(interaction.user, member),
+        source: 'discord',
+        action: 'shuffle',
+        details: { count },
+      });
       workerPool.emitActivity({
         guildId: worker.currentGuildId,
         channelId: worker.currentChannelId,
@@ -40,6 +51,16 @@ export const command: Command = {
 
     const count = worker.queue.shuffle();
     if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: message.member?.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(message.author, message.member),
+        source: 'discord',
+        action: 'shuffle',
+        details: { count },
+      });
       workerPool.emitActivity({
         guildId: worker.currentGuildId,
         channelId: worker.currentChannelId,

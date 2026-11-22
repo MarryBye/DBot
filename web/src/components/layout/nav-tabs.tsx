@@ -9,6 +9,7 @@ export interface NavTabsProps {
   busyAgentsCount: number;
   totalAgentsCount: number;
   watchViewersCount: number;
+  canViewLogs: boolean;
   isAdmin: boolean;
   t: TranslateFn;
 }
@@ -25,6 +26,7 @@ export function NavTabs({
   busyAgentsCount,
   totalAgentsCount,
   watchViewersCount,
+  canViewLogs,
   isAdmin,
   t,
 }: NavTabsProps) {
@@ -49,7 +51,12 @@ export function NavTabs({
       label: t('nav.agents'),
       badge: `${busyAgentsCount}/${totalAgentsCount}`,
     },
+    { value: 'leaderboard', icon: 'trophy', label: t('nav.leaderboard') },
   ];
+
+  if (canViewLogs) {
+    items.push({ value: 'logs', icon: 'scroll-text', label: t('nav.logs') });
+  }
 
   if (isAdmin) {
     items.push({ value: 'admin', icon: 'settings', label: t('nav.settings') });

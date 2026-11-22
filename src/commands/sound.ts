@@ -4,6 +4,7 @@ import {
   SlashCommandBuilder,
 } from 'discord.js';
 import { config } from '../config.js';
+import { actorFromDiscord, AuditLogService } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import { MyInstantsClient, SoundboardService } from '../voice/soundboard.js';
 import {
@@ -85,7 +86,10 @@ export const command: Command = {
     ),
   async autocomplete(interaction) {
     const focused = interaction.options.getFocused().toLowerCase();
-    const list = await SoundboardService.listCustomSounds(interaction.guildId!);
+    const list = await SoundboardService.listCustomSounds(
+      interaction.guildId!,
+      interaction.user.id
+    );
     const matches = list
       .filter((s) => s.name.toLowerCase().includes(focused))
       .slice(0, 25)
@@ -100,7 +104,7 @@ export const command: Command = {
     const guildId = interaction.guildId!;
 
     if (sub === 'list') {
-      const list = await SoundboardService.listCustomSounds(guildId);
+      const list = await SoundboardService.listCustomSounds(guildId, interaction.user.id);
       if (list.length === 0) {
         await interaction.reply({
           content:
@@ -196,11 +200,27 @@ export const command: Command = {
     await interaction.deferReply();
 
     try {
+      const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
       const worker = await workerPool.ensureWorkerInChannel(voiceChannel.id, guildId);
+      if (!wasInChannel) {
+        void AuditLogService.record({
+          guildId,
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+          workerId: worker.id,
+          actor: actorFromDiscord(interaction.user, member),
+          source: 'discord',
+          action: 'summon',
+        });
+      }
 
       if (sub === 'play') {
         const name = interaction.options.getString('name', true).trim();
-        const found = await SoundboardService.findCustomSoundByName(guildId, name);
+        const found = await SoundboardService.findCustomSoundByName(
+          guildId,
+          name,
+          interaction.user.id
+        );
         if (!found) {
           await interaction.editReply(`❌ Звук **"${name}"** не найден в библиотеке сервера.`);
           return;
@@ -273,7 +293,19 @@ export const command: Command = {
       }
       const statusMsg = await message.reply(`🔎 Ищу мем "${query}" на MyInstants...`);
       try {
+        const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
         const worker = await workerPool.ensureWorkerInChannel(voiceChannel.id, guildId);
+        if (!wasInChannel) {
+          void AuditLogService.record({
+            guildId,
+            channelId: voiceChannel.id,
+            channelName: voiceChannel.name,
+            workerId: worker.id,
+            actor: actorFromDiscord(message.author, message.member),
+            source: 'discord',
+            action: 'summon',
+          });
+        }
         const results = await MyInstantsClient.search(query, 3);
         if (results.length === 0) {
           await statusMsg.edit(`❌ На MyInstants не найдено мемов по запросу **"${query}"**.`);
@@ -311,7 +343,7 @@ export const command: Command = {
     }
 
     if (sub === 'list') {
-      const list = await SoundboardService.listCustomSounds(guildId);
+      const list = await SoundboardService.listCustomSounds(guildId, message.author.id);
       if (list.length === 0) {
         await message.reply('📭 Пока нет загруженных звуков. Загрузите через `+sound upload <название>` с прикреплённым файлом или в веб-панели!');
         return;
@@ -390,8 +422,24 @@ export const command: Command = {
 
     const query = args.join(' ').trim();
     try {
+      const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
       const worker = await workerPool.ensureWorkerInChannel(voiceChannel.id, guildId);
-      const local = await SoundboardService.findCustomSoundByName(guildId, query);
+      if (!wasInChannel) {
+        void AuditLogService.record({
+          guildId,
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+          workerId: worker.id,
+          actor: actorFromDiscord(message.author, message.member),
+          source: 'discord',
+          action: 'summon',
+        });
+      }
+      const local = await SoundboardService.findCustomSoundByName(
+        guildId,
+        query,
+        message.author.id
+      );
       if (local) {
         await worker.queue.playSoundEffect({
           name: local.name,

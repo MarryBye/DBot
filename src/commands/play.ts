@@ -3,6 +3,7 @@ import {
   GuildMember,
   SlashCommandBuilder,
 } from 'discord.js';
+import { actorFromDiscord, AuditLogService, toAuditTrack } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import {
   MusicResolver,
@@ -106,10 +107,23 @@ export const command: Command = {
     await interaction.deferReply();
 
     try {
+      const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
       const worker = await workerPool.ensureWorkerInChannel(
         voiceChannel.id,
         interaction.guildId!
       );
+      const actor = actorFromDiscord(interaction.user, member);
+      if (!wasInChannel) {
+        void AuditLogService.record({
+          guildId: interaction.guildId!,
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+          workerId: worker.id,
+          actor,
+          source: 'discord',
+          action: 'summon',
+        });
+      }
 
       const tracks = await MusicResolver.resolve(
         query,
@@ -125,7 +139,19 @@ export const command: Command = {
         return;
       }
 
-      const { position, isPlayingNow } = await worker.queue.add(tracks);
+      const { position, isPlayingNow, addedCount } = await worker.queue.add(tracks);
+      if (addedCount > 0) {
+        void AuditLogService.record({
+          guildId: interaction.guildId!,
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+          workerId: worker.id,
+          actor,
+          source: 'discord',
+          action: 'add_tracks',
+          tracks: tracks.slice(0, addedCount).map(toAuditTrack),
+        });
+      }
 
       const embed = buildPlayEmbed({
         tracks,
@@ -171,10 +197,23 @@ export const command: Command = {
     const statusMsg = await message.reply(`🔎 Ищу трек${platLabel}...`);
 
     try {
+      const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
       const worker = await workerPool.ensureWorkerInChannel(
         voiceChannel.id,
         message.guildId!
       );
+      const actor = actorFromDiscord(message.author, member);
+      if (!wasInChannel) {
+        void AuditLogService.record({
+          guildId: message.guildId!,
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+          workerId: worker.id,
+          actor,
+          source: 'discord',
+          action: 'summon',
+        });
+      }
 
       const tracks = await MusicResolver.resolve(
         query,
@@ -190,7 +229,19 @@ export const command: Command = {
         return;
       }
 
-      const { position, isPlayingNow } = await worker.queue.add(tracks);
+      const { position, isPlayingNow, addedCount } = await worker.queue.add(tracks);
+      if (addedCount > 0) {
+        void AuditLogService.record({
+          guildId: message.guildId!,
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+          workerId: worker.id,
+          actor,
+          source: 'discord',
+          action: 'add_tracks',
+          tracks: tracks.slice(0, addedCount).map(toAuditTrack),
+        });
+      }
 
       const embed = buildPlayEmbed({
         tracks,

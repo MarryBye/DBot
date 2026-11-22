@@ -1,6 +1,6 @@
 import type { TranslateFn } from '@/i18n';
-import type { ActiveWorkerState } from '@/types/api';
-import { formatDuration, safeHttpUrl } from '@/utils/format';
+import type { ActiveWorkerState, FavoriteTrackInput } from '@/types/api';
+import { buildTrackKey, formatDuration, safeHttpUrl } from '@/utils/format';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,7 @@ import { Separator } from '@/components/ui/separator';
 import { Slider } from '@/components/ui/slider';
 import { TrackThumbnail } from '@/components/ui/track-thumbnail';
 import { TruncatedText } from '@/components/ui/truncated-text';
+import { TrackQuickActions } from './track-quick-actions';
 
 export interface NowPlayingCardProps {
   inVoice: boolean;
@@ -23,6 +24,8 @@ export interface NowPlayingCardProps {
   volume: number;
   emptyLeaveRemainSec: number | null;
   idleLeaveRemainSec: number | null;
+  favoriteTrackKeys: ReadonlySet<string>;
+  playlistTrackKeys: ReadonlySet<string>;
   t: TranslateFn;
   onTogglePause: () => void;
   onSkip: () => void;
@@ -30,6 +33,8 @@ export interface NowPlayingCardProps {
   onCycleLoop: () => void;
   onStop: () => void;
   onVolumeChange: (value: number) => void;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
   onOpenLink: (url: string) => void;
   onCopyLink: (url: string) => void;
 }
@@ -41,6 +46,8 @@ export function NowPlayingCard({
   volume,
   emptyLeaveRemainSec,
   idleLeaveRemainSec,
+  favoriteTrackKeys,
+  playlistTrackKeys,
   t,
   onTogglePause,
   onSkip,
@@ -48,6 +55,8 @@ export function NowPlayingCard({
   onCycleLoop,
   onStop,
   onVolumeChange,
+  onToggleFavorite,
+  onAddToPlaylist,
   onOpenLink,
   onCopyLink,
 }: NowPlayingCardProps) {
@@ -55,6 +64,23 @@ export function NowPlayingCard({
   const canControl = inVoice && worker !== null;
   const hasTrack = track !== null;
   const safeLink = safeHttpUrl(track?.originalUrl);
+  const trackKey = track ? buildTrackKey(track) : '';
+  const isFavorite = Boolean(track && favoriteTrackKeys.has(trackKey));
+  const isInPlaylist = Boolean(track && playlistTrackKeys.has(trackKey));
+  const favoritePayload: FavoriteTrackInput | null = track
+    ? {
+        id: track.id,
+        title: track.title,
+        author: track.author,
+        url: track.url,
+        originalUrl: track.originalUrl,
+        durationSec: track.durationSec,
+        durationFormatted: track.durationFormatted,
+        thumbnail: track.thumbnail,
+        source: track.source,
+        mediaKind: track.mediaKind,
+      }
+    : null;
   const totalSec = track?.durationSec || 0;
   const progressPct = totalSec > 0 ? Math.min(100, (currentProgressSec / totalSec) * 100) : 0;
 
@@ -125,13 +151,30 @@ export function NowPlayingCard({
                   disabled: !canControl,
                   onSelect: onSkip,
                 },
+                ...(favoritePayload
+                  ? [
+                      {
+                        id: 'favorite',
+                        label: isFavorite ? t('favorites.remove') : t('favorites.add'),
+                        icon: 'heart' as const,
+                        separatorBefore: true,
+                        onSelect: () => onToggleFavorite(favoritePayload),
+                      },
+                      {
+                        id: 'add-to-playlist',
+                        label: t('playlists.addTrackAction'),
+                        icon: 'list-plus' as const,
+                        onSelect: () => onAddToPlaylist(favoritePayload),
+                      },
+                    ]
+                  : []),
                 ...(safeLink
                   ? [
                       {
                         id: 'open',
                         label: t('ctx.openLink'),
                         icon: 'external-link' as const,
-                        separatorBefore: true,
+                        separatorBefore: !favoritePayload,
                         onSelect: () => onOpenLink(safeLink),
                       },
                       {
@@ -159,16 +202,28 @@ export function NowPlayingCard({
                 <TrackThumbnail src={track.thumbnail} alt={track.title} size="lg" />
 
                 <div className="min-w-0 flex-1 space-y-1.5 overflow-hidden">
-                  <PlatformBadge source={track.source} />
+                  <div className="flex items-center justify-between gap-2">
+                    <PlatformBadge source={track.source} />
+                    {favoritePayload && (
+                      <TrackQuickActions
+                        track={favoritePayload}
+                        isFavorite={isFavorite}
+                        isInPlaylist={isInPlaylist}
+                        t={t}
+                        onToggleFavorite={onToggleFavorite}
+                        onAddToPlaylist={onAddToPlaylist}
+                      />
+                    )}
+                  </div>
                   <div className="min-w-0">
                     {safeLink ? (
                       <a
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex w-full min-w-0 items-center gap-1.5 text-base font-semibold leading-snug text-fg-primary hover:text-accent hover:underline"
+                        className="inline-flex max-w-full min-w-0 items-center gap-1.5 text-base font-semibold leading-snug text-fg-primary hover:text-accent hover:underline"
                       >
-                        <TruncatedText text={track.title || track.originalUrl} className="flex-1" />
+                        <TruncatedText text={track.title || track.originalUrl} />
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (

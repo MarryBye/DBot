@@ -7,12 +7,20 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { db, soundsDir } from '../db/index.js';
 import { sounds, type SoundRecord } from '../db/schema.js';
+import { ReactionService, type ReactionVote } from '../services/reactions.js';
 import {
   assertTrustedMyInstantsAudioUrl,
   MYINSTANTS_ALLOWED_HOSTS,
   readResponseBufferWithLimit,
   safeFetch,
 } from '../web/security.js';
+
+export interface SoundItemDTO extends SoundRecord {
+  isOwner: boolean;
+  likes: number;
+  dislikes: number;
+  myVote: ReactionVote;
+}
 
 export interface MemeSound {
   name: string;
@@ -164,12 +172,52 @@ export class MyInstantsClient {
 // Хранилище локальных звуков (SQLite + data/sounds/)
 // ========================================================
 export class SoundboardService {
-  public static async listCustomSounds(guildId: string): Promise<SoundRecord[]> {
-    return db
+  public static async listCustomSounds(
+    guildId: string,
+    viewerUserId?: string
+  ): Promise<SoundRecord[]> {
+    const all = await db
       .select()
       .from(sounds)
       .where(eq(sounds.guildId, guildId))
       .orderBy(desc(sounds.createdAt));
+
+    if (!viewerUserId) {
+      return all.filter((s) => Boolean(s.isPublic));
+    }
+    return all.filter((s) => Boolean(s.isPublic) || s.uploadedById === viewerUserId);
+  }
+
+  public static async listSoundsForWeb(
+    guildId: string,
+    viewerUserId: string
+  ): Promise<{ mySounds: SoundItemDTO[]; publicSounds: SoundItemDTO[] }> {
+    const all = await db
+      .select()
+      .from(sounds)
+      .where(eq(sounds.guildId, guildId))
+      .orderBy(desc(sounds.createdAt));
+
+    const visible = all.filter((s) => Boolean(s.isPublic) || s.uploadedById === viewerUserId);
+    const ids = visible.map((s) => s.id);
+    const reactionMap = await ReactionService.getSummaries('sound', ids, viewerUserId);
+
+    const hydrated: SoundItemDTO[] = visible.map((s) => {
+      const r = reactionMap.get(s.id);
+      return {
+        ...s,
+        isPublic: Boolean(s.isPublic),
+        isOwner: s.uploadedById === viewerUserId,
+        likes: r?.likes ?? 0,
+        dislikes: r?.dislikes ?? 0,
+        myVote: r?.myVote ?? 0,
+      };
+    });
+
+    return {
+      mySounds: hydrated.filter((s) => s.isOwner),
+      publicSounds: hydrated.filter((s) => s.isPublic),
+    };
   }
 
   public static async getCustomSoundById(
@@ -184,11 +232,23 @@ export class SoundboardService {
     return row ?? null;
   }
 
+  public static async getAccessibleSoundById(
+    guildId: string,
+    id: number,
+    viewerUserId: string
+  ): Promise<SoundRecord | null> {
+    const row = await this.getCustomSoundById(guildId, id);
+    if (!row) return null;
+    if (!row.isPublic && row.uploadedById !== viewerUserId) return null;
+    return row;
+  }
+
   public static async findCustomSoundByName(
     guildId: string,
-    name: string
+    name: string,
+    viewerUserId?: string
   ): Promise<SoundRecord | null> {
-    const all = await this.listCustomSounds(guildId);
+    const all = await this.listCustomSounds(guildId, viewerUserId);
     const target = name.trim().toLowerCase();
     return (
       all.find((s) => s.name.toLowerCase() === target) ??
@@ -215,8 +275,10 @@ export class SoundboardService {
     mimeType?: string;
     color?: string;
     emoji?: string;
+    isPublic?: boolean;
     uploadedById: string;
     uploadedByTag: string;
+    uploadedByUsername?: string | null;
   }): Promise<SoundRecord> {
     const cleanName = params.name.trim().slice(0, 50);
     if (!cleanName) {
@@ -235,13 +297,21 @@ export class SoundboardService {
 
     const rawExt = path.extname(params.originalFilename || '').toLowerCase() || '.mp3';
     const ext = ALLOWED_EXTENSIONS.has(rawExt) ? rawExt : '.mp3';
+    const isPublic = params.isPublic !== undefined ? Boolean(params.isPublic) : true;
 
-    // Проверяем лимит и дубликат по имени (без учёта регистра)
-    const existing = await this.listCustomSounds(params.guildId);
+    const existing = await db
+      .select()
+      .from(sounds)
+      .where(eq(sounds.guildId, params.guildId));
     if (existing.length >= MAX_SOUNDS_PER_GUILD) {
       throw new Error(`Достигнут лимит звуков на сервере (${MAX_SOUNDS_PER_GUILD}).`);
     }
-    if (existing.some((s) => s.name.toLowerCase() === cleanName.toLowerCase())) {
+    const nameConflict = existing.some(
+      (s) =>
+        s.name.toLowerCase() === cleanName.toLowerCase() &&
+        (s.uploadedById === params.uploadedById || (isPublic && Boolean(s.isPublic)))
+    );
+    if (nameConflict) {
       throw new Error(`Звук с названием "${cleanName}" уже существует.`);
     }
 
@@ -261,8 +331,10 @@ export class SoundboardService {
         mimeType,
         color: normalizeColor(params.color),
         emoji: (params.emoji || '🔊').trim().slice(0, 8) || '🔊',
+        isPublic,
         uploadedById: params.uploadedById,
         uploadedByTag: params.uploadedByTag,
+        uploadedByUsername: params.uploadedByUsername ?? null,
       })
       .returning();
 
@@ -275,8 +347,10 @@ export class SoundboardService {
     url: string;
     color?: string;
     emoji?: string;
+    isPublic?: boolean;
     uploadedById: string;
     uploadedByTag: string;
+    uploadedByUsername?: string | null;
   }): Promise<SoundRecord> {
     // Строго разрешаем только проверенные HTTPS аудиоссылки MyInstants (блокирует SSRF / IMDS!)
     const validated = await assertTrustedMyInstantsAudioUrl(params.url);
@@ -299,21 +373,75 @@ export class SoundboardService {
       originalFilename: filename,
       color: params.color,
       emoji: params.emoji || '😂',
+      isPublic: params.isPublic,
       uploadedById: params.uploadedById,
       uploadedByTag: params.uploadedByTag,
+      uploadedByUsername: params.uploadedByUsername,
     });
+  }
+
+  public static async updateCustomSound(params: {
+    guildId: string;
+    userId: string;
+    id: number;
+    name?: string;
+    color?: string;
+    isPublic?: boolean;
+  }): Promise<SoundRecord | null> {
+    const existing = await this.getCustomSoundById(params.guildId, params.id);
+    if (!existing || existing.uploadedById !== params.userId) return null;
+
+    const nextIsPublic =
+      params.isPublic !== undefined ? Boolean(params.isPublic) : Boolean(existing.isPublic);
+    let nextName = existing.name;
+    if (params.name !== undefined) {
+      const clean = params.name.trim().slice(0, 50);
+      if (!clean) {
+        throw new Error('Название звука не может быть пустым.');
+      }
+      const all = await db.select().from(sounds).where(eq(sounds.guildId, params.guildId));
+      const conflict = all.some(
+        (s) =>
+          s.id !== existing.id &&
+          s.name.toLowerCase() === clean.toLowerCase() &&
+          (s.uploadedById === params.userId || (nextIsPublic && Boolean(s.isPublic)))
+      );
+      if (conflict) {
+        throw new Error(`Звук с названием "${clean}" уже существует.`);
+      }
+      nextName = clean;
+    }
+
+    const nextColor = params.color !== undefined ? normalizeColor(params.color) : existing.color;
+
+    const [updated] = await db
+      .update(sounds)
+      .set({
+        name: nextName,
+        color: nextColor,
+        isPublic: nextIsPublic,
+      })
+      .where(and(eq(sounds.guildId, params.guildId), eq(sounds.id, params.id)))
+      .returning();
+
+    return updated ?? null;
   }
 
   public static async deleteCustomSound(
     guildId: string,
-    id: number
+    id: number,
+    ownerUserId?: string
   ): Promise<SoundRecord | null> {
     const existing = await this.getCustomSoundById(guildId, id);
     if (!existing) return null;
+    if (ownerUserId && existing.uploadedById !== ownerUserId) {
+      return null;
+    }
 
     await db
       .delete(sounds)
       .where(and(eq(sounds.guildId, guildId), eq(sounds.id, id)));
+    await ReactionService.deleteAllForTarget('sound', id);
 
     const filePath = this.getSoundFilePath(existing);
     if (fs.existsSync(filePath)) {

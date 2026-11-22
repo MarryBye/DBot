@@ -45,9 +45,11 @@ export interface ResolvedMemberContext {
   inGuild: boolean;
   isAdmin: boolean;
   canManageCookies: boolean;
+  canViewLogs: boolean;
   hasAccess: boolean;
   requiredRoleId: string | null;
   requiredRoleName: string | null;
+  username: string;
   displayName: string;
   avatarUrl: string | null;
   voice: MemberVoiceContext;
@@ -150,6 +152,7 @@ export async function deleteWebSession(token: string): Promise<void> {
 export interface GuildAccessSettings {
   requiredRoleId: string | null;
   allowedChannelId: string | null;
+  logsAdminOnly: boolean;
 }
 
 export async function getGuildSettings(guildId: string): Promise<GuildAccessSettings> {
@@ -161,6 +164,7 @@ export async function getGuildSettings(guildId: string): Promise<GuildAccessSett
   return {
     requiredRoleId: row?.requiredRoleId ?? null,
     allowedChannelId: row?.allowedChannelId ?? null,
+    logsAdminOnly: Boolean(row?.logsAdminOnly),
   };
 }
 
@@ -182,6 +186,10 @@ export async function setGuildSettings(
     patch.allowedChannelId !== undefined
       ? patch.allowedChannelId
       : existing[0]?.allowedChannelId ?? null;
+  const nextLogsAdminOnly =
+    patch.logsAdminOnly !== undefined
+      ? Boolean(patch.logsAdminOnly)
+      : Boolean(existing[0]?.logsAdminOnly);
 
   if (existing.length > 0) {
     await db
@@ -189,6 +197,7 @@ export async function setGuildSettings(
       .set({
         requiredRoleId: nextRequiredRoleId,
         allowedChannelId: nextAllowedChannelId,
+        logsAdminOnly: nextLogsAdminOnly,
         updatedAt: new Date(),
       })
       .where(eq(dashboardSettings.guildId, guildId));
@@ -197,6 +206,7 @@ export async function setGuildSettings(
       guildId,
       requiredRoleId: nextRequiredRoleId,
       allowedChannelId: nextAllowedChannelId,
+      logsAdminOnly: nextLogsAdminOnly,
       updatedAt: new Date(),
     });
   }
@@ -204,6 +214,7 @@ export async function setGuildSettings(
   return {
     requiredRoleId: nextRequiredRoleId,
     allowedChannelId: nextAllowedChannelId,
+    logsAdminOnly: nextLogsAdminOnly,
   };
 }
 
@@ -277,9 +288,11 @@ export async function resolveMemberContext(
       inGuild: false,
       isAdmin: false,
       canManageCookies: false,
+      canViewLogs: false,
       hasAccess: false,
       requiredRoleId: null,
       requiredRoleName: null,
+      username: 'unknown',
       displayName: 'Не на сервере',
       avatarUrl: null,
       voice: { inVoice: false, channelId: null, channelName: null, membersCount: 0 },
@@ -305,7 +318,8 @@ export async function resolveMemberContext(
 
   const guild = client.guilds.cache.get(active.guildId)!;
   const member = active.member;
-  const requiredRoleId = await getRequiredRoleId(guild.id);
+  const guildSettings = await getGuildSettings(guild.id);
+  const requiredRoleId = guildSettings.requiredRoleId;
   const requiredRoleName = requiredRoleId
     ? guild.roles.cache.get(requiredRoleId)?.name ?? null
     : null;
@@ -314,6 +328,7 @@ export async function resolveMemberContext(
   const canManageCookies =
     isAdmin && (config.botOwnerIds.length === 0 || config.botOwnerIds.includes(userId));
   const hasAccess = isAdmin || !requiredRoleId || member.roles.cache.has(requiredRoleId);
+  const canViewLogs = hasAccess && (isAdmin || !guildSettings.logsAdminOnly);
 
   const voiceState = guild.voiceStates.cache.get(userId);
   const voiceChannel = (voiceState?.channel ?? null) as VoiceBasedChannel | null;
@@ -328,9 +343,11 @@ export async function resolveMemberContext(
     inGuild: true,
     isAdmin,
     canManageCookies,
+    canViewLogs,
     hasAccess,
     requiredRoleId,
     requiredRoleName,
+    username: member.user.username,
     displayName: member.displayName,
     avatarUrl: member.displayAvatarURL({ size: 128 }),
     voice: {

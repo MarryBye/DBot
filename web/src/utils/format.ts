@@ -82,3 +82,34 @@ export function extractYouTubeVideoId(url: string | null | undefined, fallbackId
   }
   return null;
 }
+
+export function buildTrackKey(track: {
+  originalUrl?: string | null;
+  url?: string | null;
+  source?: string | null;
+  id?: string | null;
+  title?: string | null;
+}): string {
+  const rawUrl = (track.originalUrl || track.url || '').trim();
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      const host = parsed.hostname.toLowerCase();
+      if (host === 'youtu.be') {
+        const vid = parsed.pathname.replace(/^\/+/, '').split('/')[0];
+        if (vid) return `yt:${vid}`;
+      }
+      if (host.endsWith('youtube.com')) {
+        const v = parsed.searchParams.get('v');
+        if (v) return `yt:${v}`;
+      }
+      parsed.hash = '';
+      return parsed.toString().toLowerCase().slice(0, 400);
+    } catch {
+      return rawUrl.toLowerCase().slice(0, 400);
+    }
+  }
+  const source = (track.source || 'youtube').toLowerCase();
+  const id = (track.id || track.title || '').trim().toLowerCase();
+  return `${source}:${id}`.slice(0, 400);
+}

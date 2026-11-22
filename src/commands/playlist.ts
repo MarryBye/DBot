@@ -4,6 +4,7 @@ import {
   MessageFlags,
   SlashCommandBuilder,
 } from 'discord.js';
+import { actorFromDiscord, AuditLogService, toAuditTrack } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import { formatDuration } from '../voice/music-resolver.js';
 import { PlaylistService, type UserPlaylist } from '../voice/playlists.js';
@@ -256,12 +257,39 @@ export const command: Command = {
       await interaction.deferReply();
 
       try {
+        const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
         const worker = await workerPool.ensureWorkerInChannel(voiceChannel.id, guildId);
+        const actor = actorFromDiscord(interaction.user, member);
+        if (!wasInChannel) {
+          void AuditLogService.record({
+            guildId,
+            channelId: voiceChannel.id,
+            channelName: voiceChannel.name,
+            workerId: worker.id,
+            actor,
+            source: 'discord',
+            action: 'summon',
+          });
+        }
         const tracks = PlaylistService.buildPlayableTracks(playlist, {
           id: userId,
           tag: interaction.user.tag,
         });
         const { addedCount, isPlayingNow } = await worker.queue.add(tracks);
+        if (addedCount > 0) {
+          void AuditLogService.record({
+            guildId,
+            channelId: voiceChannel.id,
+            channelName: voiceChannel.name,
+            workerId: worker.id,
+            actor,
+            source: 'discord',
+            action: 'add_tracks',
+            details: { playlistName: playlist.name },
+            tracks: tracks.slice(0, addedCount).map(toAuditTrack),
+            mergeable: false,
+          });
+        }
         const firstTrack = tracks[0];
 
         const embed = new EmbedBuilder()
@@ -409,12 +437,39 @@ export const command: Command = {
         `⏳ Загружаю плейлист **«${playlist.name}»** (${playlist.trackCount} тр.)...`
       );
       try {
+        const wasInChannel = Boolean(workerPool.getWorkerForChannel(voiceChannel.id));
         const worker = await workerPool.ensureWorkerInChannel(voiceChannel.id, guildId);
+        const actor = actorFromDiscord(message.author, message.member);
+        if (!wasInChannel) {
+          void AuditLogService.record({
+            guildId,
+            channelId: voiceChannel.id,
+            channelName: voiceChannel.name,
+            workerId: worker.id,
+            actor,
+            source: 'discord',
+            action: 'summon',
+          });
+        }
         const tracks = PlaylistService.buildPlayableTracks(playlist, {
           id: userId,
           tag: message.author.tag,
         });
         const { addedCount, isPlayingNow } = await worker.queue.add(tracks);
+        if (addedCount > 0) {
+          void AuditLogService.record({
+            guildId,
+            channelId: voiceChannel.id,
+            channelName: voiceChannel.name,
+            workerId: worker.id,
+            actor,
+            source: 'discord',
+            action: 'add_tracks',
+            details: { playlistName: playlist.name },
+            tracks: tracks.slice(0, addedCount).map(toAuditTrack),
+            mergeable: false,
+          });
+        }
         const firstTrack = tracks[0];
 
         const embed = new EmbedBuilder()

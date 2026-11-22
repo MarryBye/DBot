@@ -1,18 +1,28 @@
 import type {
   AdminSettings,
+  AuditLogQueryParams,
+  AuditLogQueryResult,
   AuthInfo,
   ChannelActivityEvent,
   CookiesStatus,
   CustomSound,
   DashboardState,
+  FavoriteTrackInput,
+  FavoriteTrackItem,
+  LeaderboardQueryParams,
+  LeaderboardQueryResult,
   LoadPlaylistResponse,
   LoopMode,
   MemeRegion,
   MemeSound,
   PlatformOption,
+  PlaylistsLibrary,
   PlayTrackResponse,
+  ReactionSummary,
+  ReactionVote,
   SavePlaylistResponse,
   SearchResultItem,
+  SoundboardLibrary,
   UpdateCookiesResponse,
   UserPlaylist,
 } from '@/types/api';
@@ -25,6 +35,8 @@ export interface SseHandlers {
   onState: (state: DashboardState) => void;
   onSounds: () => void;
   onPlaylists: () => void;
+  onFavorites: () => void;
+  onLogs: (guildId: string | null) => void;
   onActivity: (event: ChannelActivityEvent) => void;
 }
 
@@ -59,32 +71,73 @@ export interface DashboardApiClient {
   playQueueItemNow(index: number): Promise<void>;
   removeQueueItem(index: number): Promise<void>;
   clearQueue(): Promise<void>;
-  listPlaylists(): Promise<UserPlaylist[]>;
-  savePlaylist(name: string): Promise<SavePlaylistResponse>;
+  listFavorites(): Promise<FavoriteTrackItem[]>;
+  toggleFavorite(track: FavoriteTrackInput): Promise<{
+    favorited: boolean;
+    item: FavoriteTrackItem | null;
+    trackKey: string;
+  }>;
+  removeFavorite(id: number): Promise<void>;
+  playAllFavorites(): Promise<{ addedCount: number; isPlayingNow: boolean }>;
+  listPlaylists(): Promise<PlaylistsLibrary>;
+  savePlaylist(payload: {
+    name: string;
+    color?: string;
+    isPublic?: boolean;
+  }): Promise<SavePlaylistResponse>;
+  updatePlaylist(
+    id: number,
+    patch: { name?: string; color?: string; isPublic?: boolean }
+  ): Promise<UserPlaylist>;
+  copyPlaylist(id: number, copySuffix?: string): Promise<UserPlaylist>;
+  addTrackToPlaylist(
+    playlistId: number,
+    track: FavoriteTrackInput
+  ): Promise<{ playlist: UserPlaylist; alreadyExists: boolean }>;
+  removeTrackFromPlaylist(
+    playlistId: number,
+    params: { trackKey?: string; index?: number }
+  ): Promise<{ playlist: UserPlaylist; removed: boolean }>;
+  createPlaylistWithTrack(payload: {
+    name: string;
+    color?: string;
+    isPublic?: boolean;
+    track: FavoriteTrackInput;
+  }): Promise<UserPlaylist>;
+  reactPlaylist(id: number, value: ReactionVote): Promise<ReactionSummary>;
   loadPlaylist(id: number): Promise<LoadPlaylistResponse>;
   deletePlaylist(id: number): Promise<void>;
-  listCustomSounds(): Promise<CustomSound[]>;
+  listCustomSounds(): Promise<SoundboardLibrary>;
   uploadCustomSound(payload: {
     name: string;
     color: string;
+    isPublic: boolean;
     filename: string;
     mimeType: string;
     dataBase64: string;
   }): Promise<CustomSound>;
+  updateCustomSound(
+    id: number,
+    patch: { name?: string; color?: string; isPublic?: boolean }
+  ): Promise<CustomSound>;
+  reactSound(id: number, value: ReactionVote): Promise<ReactionSummary>;
   deleteCustomSound(id: number): Promise<void>;
   playCustomSound(id: number): Promise<{ played: string }>;
   listMemes(params: { query?: string; region: MemeRegion }): Promise<MemeSound[]>;
   playMeme(url: string, name: string): Promise<{ played: string }>;
-  saveMeme(meme: MemeSound): Promise<CustomSound>;
+  saveMeme(meme: MemeSound, isPublic?: boolean): Promise<CustomSound>;
   getAdminSettings(): Promise<AdminSettings>;
   saveAdminSettings(payload: {
     requiredRoleId: string | null;
     allowedChannelId: string | null;
+    logsAdminOnly: boolean;
   }): Promise<void>;
   getCookiesStatus(): Promise<CookiesStatus>;
   updateCookies(content: string): Promise<UpdateCookiesResponse>;
   reloadCookies(): Promise<{ status: CookiesStatus }>;
   clearCookies(): Promise<{ status: CookiesStatus }>;
+  getLogs(params: AuditLogQueryParams): Promise<AuditLogQueryResult>;
+  getLeaderboard(params: LeaderboardQueryParams): Promise<LeaderboardQueryResult>;
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -139,6 +192,19 @@ export function createHttpApiClient(): DashboardApiClient {
 
       es.addEventListener('playlists', () => {
         handlers.onPlaylists();
+      });
+
+      es.addEventListener('favorites', () => {
+        handlers.onFavorites();
+      });
+
+      es.addEventListener('logs', (event) => {
+        try {
+          const parsed = JSON.parse((event as MessageEvent).data) as { guildId?: string | null };
+          handlers.onLogs(parsed.guildId ?? null);
+        } catch {
+          handlers.onLogs(null);
+        }
       });
 
       es.addEventListener('activity', (event) => {
@@ -312,15 +378,93 @@ export function createHttpApiClient(): DashboardApiClient {
       await request('/api/queue/clear', { method: 'POST' });
     },
 
-    listPlaylists: async () => {
-      const data = await request<{ playlists: UserPlaylist[] }>('/api/playlists');
-      return data.playlists ?? [];
+    listFavorites: async () => {
+      const data = await request<{ favorites: FavoriteTrackItem[] }>('/api/favorites');
+      return data.favorites ?? [];
     },
 
-    savePlaylist: (name) =>
+    toggleFavorite: (track) =>
+      request<{ favorited: boolean; item: FavoriteTrackItem | null; trackKey: string }>(
+        '/api/favorites/toggle',
+        {
+          method: 'POST',
+          body: JSON.stringify(track),
+        }
+      ),
+
+    removeFavorite: async (id) => {
+      await request(`/api/favorites/${id}`, { method: 'DELETE' });
+    },
+
+    playAllFavorites: () =>
+      request<{ addedCount: number; isPlayingNow: boolean }>('/api/favorites/play-all', {
+        method: 'POST',
+      }),
+
+    listPlaylists: async () => {
+      const data = await request<{
+        myPlaylists?: UserPlaylist[];
+        publicPlaylists?: UserPlaylist[];
+        playlists?: UserPlaylist[];
+      }>('/api/playlists');
+      return {
+        myPlaylists: data.myPlaylists ?? data.playlists ?? [],
+        publicPlaylists: data.publicPlaylists ?? [],
+      };
+    },
+
+    savePlaylist: (payload) =>
       request<SavePlaylistResponse>('/api/playlists/save', {
         method: 'POST',
-        body: JSON.stringify({ name }),
+        body: JSON.stringify(payload),
+      }),
+
+    updatePlaylist: async (id, patch) => {
+      const data = await request<{ playlist: UserPlaylist }>(`/api/playlists/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      return data.playlist;
+    },
+
+    copyPlaylist: async (id, copySuffix) => {
+      const data = await request<{ playlist: UserPlaylist }>(`/api/playlists/${id}/copy`, {
+        method: 'POST',
+        body: JSON.stringify({ copySuffix }),
+      });
+      return data.playlist;
+    },
+
+    addTrackToPlaylist: (playlistId, track) =>
+      request<{ playlist: UserPlaylist; alreadyExists: boolean }>(
+        `/api/playlists/${playlistId}/tracks`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ track }),
+        }
+      ),
+
+    removeTrackFromPlaylist: (playlistId, params) =>
+      request<{ playlist: UserPlaylist; removed: boolean }>(
+        `/api/playlists/${playlistId}/tracks/remove`,
+        {
+          method: 'POST',
+          body: JSON.stringify(params),
+        }
+      ),
+
+    createPlaylistWithTrack: async (payload) => {
+      const data = await request<{ playlist: UserPlaylist }>('/api/playlists/create-with-track', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      return data.playlist;
+    },
+
+    reactPlaylist: (id, value) =>
+      request<ReactionSummary>(`/api/playlists/${id}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
       }),
 
     loadPlaylist: (id) =>
@@ -334,8 +478,15 @@ export function createHttpApiClient(): DashboardApiClient {
     },
 
     listCustomSounds: async () => {
-      const data = await request<{ sounds: CustomSound[] }>('/api/soundboard/custom');
-      return data.sounds ?? [];
+      const data = await request<{
+        mySounds?: CustomSound[];
+        publicSounds?: CustomSound[];
+        sounds?: CustomSound[];
+      }>('/api/soundboard/custom');
+      return {
+        mySounds: data.mySounds ?? [],
+        publicSounds: data.publicSounds ?? data.sounds ?? [],
+      };
     },
 
     uploadCustomSound: async (payload) => {
@@ -345,6 +496,20 @@ export function createHttpApiClient(): DashboardApiClient {
       });
       return data.sound;
     },
+
+    updateCustomSound: async (id, patch) => {
+      const data = await request<{ sound: CustomSound }>(`/api/soundboard/custom/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      return data.sound;
+    },
+
+    reactSound: (id, value) =>
+      request<ReactionSummary>(`/api/soundboard/custom/${id}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      }),
 
     deleteCustomSound: async (id) => {
       await request(`/api/soundboard/custom/${id}`, { method: 'DELETE' });
@@ -370,10 +535,10 @@ export function createHttpApiClient(): DashboardApiClient {
         body: JSON.stringify({ type: 'url', url, name }),
       }),
 
-    saveMeme: async (meme) => {
+    saveMeme: async (meme, isPublic = false) => {
       const data = await request<{ sound: CustomSound }>('/api/soundboard/save-meme', {
         method: 'POST',
-        body: JSON.stringify({ name: meme.name, url: meme.url, color: meme.color }),
+        body: JSON.stringify({ name: meme.name, url: meme.url, color: meme.color, isPublic }),
       });
       return data.sound;
     },
@@ -404,5 +569,25 @@ export function createHttpApiClient(): DashboardApiClient {
       request<{ status: CookiesStatus }>('/api/admin/cookies', {
         method: 'DELETE',
       }),
+
+    getLogs: (params) => {
+      const qs = new URLSearchParams();
+      qs.set('page', String(params.page || 1));
+      if (params.pageSize) qs.set('pageSize', String(params.pageSize));
+      if (params.action && params.action !== 'all') qs.set('action', params.action);
+      if (params.actorId && params.actorId !== 'all') qs.set('actorId', params.actorId);
+      if (params.userQuery?.trim()) qs.set('userQuery', params.userQuery.trim());
+      return request<AuditLogQueryResult>(`/api/logs?${qs.toString()}`);
+    },
+
+    getLeaderboard: (params) => {
+      const qs = new URLSearchParams();
+      qs.set('page', String(params.page || 1));
+      if (params.pageSize) qs.set('pageSize', String(params.pageSize));
+      if (params.sortBy) qs.set('sortBy', params.sortBy);
+      if (params.sortDir) qs.set('sortDir', params.sortDir);
+      if (params.search?.trim()) qs.set('q', params.search.trim());
+      return request<LeaderboardQueryResult>(`/api/leaderboard?${qs.toString()}`);
+    },
   };
 }

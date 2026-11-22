@@ -1,5 +1,5 @@
 import type { TranslateFn } from '@/i18n';
-import type { SearchResultItem, SearchResultKind } from '@/types/api';
+import type { FavoriteTrackInput, SearchResultItem, SearchResultKind } from '@/types/api';
 import { safeHttpUrl } from '@/utils/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,7 @@ import { Icon, type IconName } from '@/components/ui/icon';
 import { PlatformBadge } from '@/components/ui/platform-badge';
 import { TrackThumbnail } from '@/components/ui/track-thumbnail';
 import { TruncatedText } from '@/components/ui/truncated-text';
+import { TrackQuickActions } from './track-quick-actions';
 
 const KIND_ICON: Record<SearchResultKind, IconName> = {
   music: 'music',
@@ -21,9 +22,13 @@ export interface SearchResultRowProps {
   result: SearchResultItem;
   isAdded: boolean;
   isAdding: boolean;
+  isFavorite: boolean;
+  isInPlaylist: boolean;
   disabled: boolean;
   t: TranslateFn;
   onAdd: (result: SearchResultItem) => void;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
   onOpenLink: (url: string) => void;
   onCopyLink: (url: string) => void;
 }
@@ -32,14 +37,34 @@ export function SearchResultRow({
   result,
   isAdded,
   isAdding,
+  isFavorite,
+  isInPlaylist,
   disabled,
   t,
   onAdd,
+  onToggleFavorite,
+  onAddToPlaylist,
   onOpenLink,
   onCopyLink,
 }: SearchResultRowProps) {
   const kindIcon = KIND_ICON[result.kind] ?? 'music';
   const safeLink = safeHttpUrl(result.url);
+  const canFavorite = result.kind !== 'playlist';
+  const favoritePayload: FavoriteTrackInput = {
+    id: result.id,
+    title: result.title,
+    author: result.author,
+    url: result.url,
+    originalUrl: result.url,
+    durationSec: result.durationSec,
+    durationFormatted: result.durationFormatted,
+    thumbnail: result.thumbnail,
+    source: result.source,
+    mediaKind:
+      result.kind === 'video' || result.kind === 'stream' || result.kind === 'music'
+        ? result.kind
+        : undefined,
+  };
 
   const menuItems: ContextMenuItem[] = [
     {
@@ -49,13 +74,30 @@ export function SearchResultRow({
       disabled: disabled || isAdding,
       onSelect: () => onAdd(result),
     },
+    ...(canFavorite
+      ? [
+          {
+            id: 'favorite',
+            label: isFavorite ? t('favorites.remove') : t('favorites.add'),
+            icon: 'heart' as const,
+            separatorBefore: true,
+            onSelect: () => onToggleFavorite(favoritePayload),
+          },
+          {
+            id: 'add-to-playlist',
+            label: t('playlists.addTrackAction'),
+            icon: 'list-plus' as const,
+            onSelect: () => onAddToPlaylist(favoritePayload),
+          },
+        ]
+      : []),
     ...(safeLink
       ? [
           {
             id: 'open',
             label: t('ctx.openLink'),
             icon: 'external-link' as const,
-            separatorBefore: true,
+            separatorBefore: !canFavorite,
             onSelect: () => onOpenLink(safeLink),
           },
           {
@@ -111,16 +153,28 @@ export function SearchResultRow({
           </div>
         </div>
 
-        <Button
-          variant={isAdded ? 'secondary' : 'primary'}
-          size="sm"
-          disabled={disabled || isAdding}
-          onClick={() => onAdd(result)}
-          className="shrink-0"
-        >
-          <Icon name={isAdded ? 'check' : 'plus'} size="xs" />
-          <span>{isAdded ? t('search.added') : t('search.add')}</span>
-        </Button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {canFavorite && (
+            <TrackQuickActions
+              track={favoritePayload}
+              isFavorite={isFavorite}
+              isInPlaylist={isInPlaylist}
+              t={t}
+              onToggleFavorite={onToggleFavorite}
+              onAddToPlaylist={onAddToPlaylist}
+            />
+          )}
+          <Button
+            variant={isAdded ? 'secondary' : 'primary'}
+            size="sm"
+            disabled={disabled || isAdding}
+            onClick={() => onAdd(result)}
+            className="shrink-0"
+          >
+            <Icon name={isAdded ? 'check' : 'plus'} size="xs" />
+            <span>{isAdded ? t('search.added') : t('search.add')}</span>
+          </Button>
+        </div>
       </div>
     </ContextMenu>
   );

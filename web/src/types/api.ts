@@ -4,10 +4,21 @@ export type TrackMediaKind = 'video' | 'music' | 'stream';
 export type SearchResultKind = 'music' | 'video' | 'stream' | 'track' | 'playlist';
 export type LoopMode = 'off' | 'track' | 'queue';
 export type MemeRegion = 'ru' | 'us';
-export type AppTab = 'player' | 'watch' | 'playlists' | 'soundboard' | 'agents' | 'admin';
-export type SoundboardTab = 'custom' | 'memes';
+export type AppTab =
+  | 'player'
+  | 'watch'
+  | 'playlists'
+  | 'soundboard'
+  | 'agents'
+  | 'leaderboard'
+  | 'logs'
+  | 'admin';
+export type MyTracksTab = 'favorites' | 'my' | 'public';
+export type SoundboardTab = 'my' | 'public' | 'memes';
 export type AdminSectionId = 'access' | 'cookies';
 export type ToastVariant = 'info' | 'success' | 'warning' | 'danger';
+export type ReactionVote = 1 | -1 | 0;
+export type LibrarySortOption = 'newest' | 'oldest' | 'likes' | 'dislikes' | 'author' | 'name';
 
 export type ChannelActivityAction =
   | 'stop'
@@ -87,6 +98,7 @@ export interface UserProfile {
   inGuild: boolean;
   isAdmin: boolean;
   canManageCookies: boolean;
+  canViewLogs: boolean;
   hasAccess: boolean;
   requiredRoleId: string | null;
   requiredRoleName: string | null;
@@ -183,7 +195,18 @@ export interface CustomSound {
   emoji: string;
   uploadedById: string;
   uploadedByTag: string;
+  uploadedByUsername?: string | null;
+  isPublic: boolean;
+  isOwner: boolean;
+  likes: number;
+  dislikes: number;
+  myVote: ReactionVote;
   createdAt: string | number;
+}
+
+export interface SoundboardLibrary {
+  mySounds: CustomSound[];
+  publicSounds: CustomSound[];
 }
 
 export interface MemeSound {
@@ -204,14 +227,63 @@ export interface SavedTrackSnapshot {
   source: TrackSource;
 }
 
+export interface FavoriteTrackInput {
+  id?: string;
+  title: string;
+  author?: string;
+  url?: string;
+  originalUrl?: string;
+  durationSec?: number;
+  durationFormatted?: string;
+  thumbnail?: string | null;
+  source: TrackSource;
+  mediaKind?: TrackMediaKind;
+}
+
+export interface FavoriteTrackItem {
+  id: number;
+  trackKey: string;
+  trackId: string;
+  title: string;
+  author: string;
+  url: string;
+  originalUrl: string;
+  durationSec: number;
+  durationFormatted: string;
+  thumbnail: string | null;
+  source: TrackSource;
+  mediaKind?: TrackMediaKind;
+  createdAt: number;
+}
+
 export interface UserPlaylist {
   id: number;
   userId: string;
+  guildId: string | null;
+  authorName: string;
+  authorUsername: string | null;
   name: string;
+  color: string;
+  isPublic: boolean;
+  isOwner: boolean;
+  likes: number;
+  dislikes: number;
+  myVote: ReactionVote;
   trackCount: number;
   tracks: SavedTrackSnapshot[];
   createdAt: string | number;
   updatedAt: string | number;
+}
+
+export interface PlaylistsLibrary {
+  myPlaylists: UserPlaylist[];
+  publicPlaylists: UserPlaylist[];
+}
+
+export interface ReactionSummary {
+  likes: number;
+  dislikes: number;
+  myVote: ReactionVote;
 }
 
 export interface GuildRoleOption {
@@ -229,6 +301,7 @@ export interface GuildChannelOption {
 export interface AdminSettings {
   requiredRoleId: string | null;
   allowedChannelId: string | null;
+  logsAdminOnly: boolean;
   roles: GuildRoleOption[];
   channels: GuildChannelOption[];
 }
@@ -266,4 +339,149 @@ export interface UpdateCookiesResponse {
   status: CookiesStatus;
   keptCount: number;
   strippedCount: number;
+}
+
+export type AuditLogAction =
+  | 'summon'
+  | 'add_tracks'
+  | 'remove_tracks'
+  | 'play_now'
+  | 'skip'
+  | 'clear_queue'
+  | 'stop'
+  | 'loop'
+  | 'shuffle'
+  | 'pause'
+  | 'resume'
+  | 'settings_update'
+  | 'cookies_update';
+
+export type AuditLogFilterAction = 'all' | 'playback' | AuditLogAction;
+
+export type AuditLogSource = 'web' | 'discord';
+
+export interface AuditTrackSnapshot {
+  id: string;
+  title: string;
+  author: string;
+  originalUrl: string;
+  durationFormatted: string;
+  source: TrackSource;
+}
+
+export interface AuditLogDetails {
+  loopMode?: LoopMode;
+  playlistName?: string;
+  requiredRoleId?: string | null;
+  requiredRoleName?: string | null;
+  allowedChannelId?: string | null;
+  allowedChannelName?: string | null;
+  logsAdminOnly?: boolean;
+  cookiesOp?: 'uploaded' | 'reloaded' | 'cleared';
+  cookiesLineCount?: number;
+  count?: number;
+}
+
+export interface AuditLogActor {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+export interface AuditLogEntry {
+  id: number;
+  guildId: string;
+  channelId: string | null;
+  channelName: string | null;
+  workerId: number | null;
+  actorId: string;
+  actorUsername: string;
+  actorDisplayName: string;
+  actorAvatarUrl: string | null;
+  source: AuditLogSource;
+  action: AuditLogAction;
+  details: AuditLogDetails | null;
+  tracks: AuditTrackSnapshot[];
+  trackCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AuditLogQueryParams {
+  page: number;
+  pageSize?: number;
+  action?: AuditLogFilterAction;
+  actorId?: string;
+  userQuery?: string;
+}
+
+export interface AuditLogQueryResult {
+  entries: AuditLogEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  actors: AuditLogActor[];
+}
+
+export type LeaderboardSortBy =
+  | 'score'
+  | 'voiceSeconds'
+  | 'tracksAdded'
+  | 'totalLikes'
+  | 'sfxPlayed'
+  | 'skipsCount';
+
+export type LeaderboardSortDir = 'desc' | 'asc';
+
+export interface LeaderboardEntry {
+  rank: number;
+  userId: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  inVoiceNow: boolean;
+  score: number;
+  tracksAdded: number;
+  voiceSeconds: number;
+  sfxPlayed: number;
+  skipsCount: number;
+  playlistsLoaded: number;
+  playlistLikes: number;
+  soundLikes: number;
+  totalLikes: number;
+  playlistsCount: number;
+  soundsCount: number;
+  favoritesCount: number;
+  updatedAt: number;
+}
+
+export interface LeaderboardSummary {
+  totalParticipants: number;
+  totalTracksAdded: number;
+  totalVoiceSeconds: number;
+  totalLikes: number;
+  totalSfxPlayed: number;
+  activeListenersNow: number;
+}
+
+export interface LeaderboardQueryParams {
+  page: number;
+  pageSize?: number;
+  sortBy?: LeaderboardSortBy;
+  sortDir?: LeaderboardSortDir;
+  search?: string;
+}
+
+export interface LeaderboardQueryResult {
+  entries: LeaderboardEntry[];
+  myEntry: LeaderboardEntry | null;
+  summary: LeaderboardSummary;
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  sortBy: LeaderboardSortBy;
+  sortDir: LeaderboardSortDir;
 }

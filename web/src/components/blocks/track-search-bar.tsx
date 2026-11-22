@@ -1,12 +1,13 @@
 import * as React from 'react';
 import type { TranslateFn } from '@/i18n';
-import type { PlatformOption, SearchResultItem } from '@/types/api';
+import type { FavoriteTrackInput, PlatformOption, SearchResultItem, TrackSource } from '@/types/api';
 import { cn } from '@/utils/cn';
 import { isDirectUrl } from '@/utils/format';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Icon } from '@/components/ui/icon';
 import { Input } from '@/components/ui/input';
+import { PlatformIcon } from '@/components/ui/platform-badge';
 import { SearchResultsDropdown } from './search-results-dropdown';
 
 export interface TrackSearchBarProps {
@@ -23,12 +24,16 @@ export interface TrackSearchBarProps {
   isSearching: boolean;
   addingResultId: string | null;
   addedResultIds: ReadonlySet<string>;
+  favoriteTrackKeys: ReadonlySet<string>;
+  playlistTrackKeys: ReadonlySet<string>;
   t: TranslateFn;
   onQueryChange: (value: string) => void;
   onPlatformChange: (platform: PlatformOption) => void;
   onSearchSubmit: () => void;
   onDirectUrlSubmit: () => void;
   onAddSearchResult: (result: SearchResultItem) => void;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
   onOpenLink: (url: string) => void;
   onCopyLink: (url: string) => void;
   onPrevSearchPage: () => void;
@@ -36,11 +41,11 @@ export interface TrackSearchBarProps {
   onCloseSearch: () => void;
 }
 
-const PLATFORMS: ReadonlyArray<{ value: PlatformOption; dotClass?: string }> = [
+const PLATFORMS: ReadonlyArray<{ value: PlatformOption; source?: TrackSource }> = [
   { value: 'auto' },
-  { value: 'youtube', dotClass: 'bg-platform-youtube' },
-  { value: 'soundcloud', dotClass: 'bg-platform-soundcloud' },
-  { value: 'spotify', dotClass: 'bg-platform-spotify' },
+  { value: 'youtube', source: 'youtube' },
+  { value: 'soundcloud', source: 'soundcloud' },
+  { value: 'spotify', source: 'spotify' },
 ];
 
 export function TrackSearchBar({
@@ -57,12 +62,16 @@ export function TrackSearchBar({
   isSearching,
   addingResultId,
   addedResultIds,
+  favoriteTrackKeys,
+  playlistTrackKeys,
   t,
   onQueryChange,
   onPlatformChange,
   onSearchSubmit,
   onDirectUrlSubmit,
   onAddSearchResult,
+  onToggleFavorite,
+  onAddToPlaylist,
   onOpenLink,
   onCopyLink,
   onPrevSearchPage,
@@ -128,8 +137,8 @@ export function TrackSearchBar({
                       : 'border-border bg-subtle text-fg-secondary hover:bg-hover hover:text-fg-primary'
                   )}
                 >
-                  {item.dotClass ? (
-                    <span className={cn('h-2 w-2 rounded-[1px]', item.dotClass)} />
+                  {item.source ? (
+                    <PlatformIcon source={item.source} size="xs" />
                   ) : (
                     <Icon name="sparkles" size="xs" />
                   )}
@@ -176,9 +185,13 @@ export function TrackSearchBar({
           isSearching={isSearching}
           addingResultId={addingResultId}
           addedResultIds={addedResultIds}
+          favoriteTrackKeys={favoriteTrackKeys}
+          playlistTrackKeys={playlistTrackKeys}
           disabled={disabled}
           t={t}
           onAddResult={onAddSearchResult}
+          onToggleFavorite={onToggleFavorite}
+          onAddToPlaylist={onAddToPlaylist}
           onOpenLink={onOpenLink}
           onCopyLink={onCopyLink}
           onPrevPage={onPrevSearchPage}

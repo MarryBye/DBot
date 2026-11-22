@@ -1,8 +1,8 @@
 import * as React from 'react';
 import type { TranslateFn } from '@/i18n';
-import type { ActiveWorkerState, VoiceMemberInfo } from '@/types/api';
+import type { ActiveWorkerState, FavoriteTrackInput, VoiceMemberInfo } from '@/types/api';
 import { extractAccentColor, getDeterministicAccentColor } from '@/utils/color';
-import { extractYouTubeVideoId, formatDuration, safeHttpUrl } from '@/utils/format';
+import { buildTrackKey, extractYouTubeVideoId, formatDuration, safeHttpUrl } from '@/utils/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
@@ -14,6 +14,7 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { TruncatedText } from '@/components/ui/truncated-text';
 import { UserChip } from '@/components/ui/user-chip';
 import { VinylDisc } from '@/components/ui/vinyl-disc';
+import { TrackQuickActions } from './track-quick-actions';
 
 const YOUTUBE_EMBED_ORIGIN = 'https://www.youtube-nocookie.com';
 
@@ -23,7 +24,11 @@ export interface WatchTogetherSectionProps {
   worker: ActiveWorkerState | null;
   currentProgressSec: number;
   viewers: VoiceMemberInfo[];
+  favoriteTrackKeys: ReadonlySet<string>;
+  playlistTrackKeys: ReadonlySet<string>;
   t: TranslateFn;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
 }
 
 export function WatchTogetherSection({
@@ -32,7 +37,11 @@ export function WatchTogetherSection({
   worker,
   currentProgressSec,
   viewers,
+  favoriteTrackKeys,
+  playlistTrackKeys,
   t,
+  onToggleFavorite,
+  onAddToPlaylist,
 }: WatchTogetherSectionProps) {
   const track = worker?.currentTrack ?? null;
   const videoId = React.useMemo(() => {
@@ -119,6 +128,23 @@ export function WatchTogetherSection({
   const progressPct = totalSec > 0 ? Math.min(100, (currentProgressSec / totalSec) * 100) : 0;
   const safeThumb = safeHttpUrl(track?.thumbnail);
   const safeLink = safeHttpUrl(track?.originalUrl);
+  const trackKey = track ? buildTrackKey(track) : '';
+  const isFavorite = Boolean(track && favoriteTrackKeys.has(trackKey));
+  const isInPlaylist = Boolean(track && playlistTrackKeys.has(trackKey));
+  const favoritePayload: FavoriteTrackInput | null = track
+    ? {
+        id: track.id,
+        title: track.title,
+        author: track.author,
+        url: track.url,
+        originalUrl: track.originalUrl,
+        durationSec: track.durationSec,
+        durationFormatted: track.durationFormatted,
+        thumbnail: track.thumbnail,
+        source: track.source,
+        mediaKind: track.mediaKind,
+      }
+    : null;
 
   const embedSrc =
     videoId && isWatchingVideo
@@ -210,6 +236,16 @@ export function WatchTogetherSection({
                     {worker?.isPaused && (
                       <Badge variant="warning">{t('agents.pausedBadge')}</Badge>
                     )}
+                    {favoritePayload && (
+                      <TrackQuickActions
+                        track={favoritePayload}
+                        isFavorite={isFavorite}
+                        isInPlaylist={isInPlaylist}
+                        t={t}
+                        onToggleFavorite={onToggleFavorite}
+                        onAddToPlaylist={onAddToPlaylist}
+                      />
+                    )}
                   </div>
                   <div className="min-w-0 text-base font-semibold text-fg-primary">
                     {safeLink ? (
@@ -217,9 +253,9 @@ export function WatchTogetherSection({
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
+                        className="inline-flex max-w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
                       >
-                        <TruncatedText text={track.title || track.originalUrl} className="flex-1" />
+                        <TruncatedText text={track.title || track.originalUrl} />
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (
@@ -277,6 +313,16 @@ export function WatchTogetherSection({
                   {worker?.isPaused && (
                     <Badge variant="warning">{t('agents.pausedBadge')}</Badge>
                   )}
+                  {favoritePayload && (
+                    <TrackQuickActions
+                      track={favoritePayload}
+                      isFavorite={isFavorite}
+                      isInPlaylist={isInPlaylist}
+                      t={t}
+                      onToggleFavorite={onToggleFavorite}
+                      onAddToPlaylist={onAddToPlaylist}
+                    />
+                  )}
                 </div>
 
                 <div className="space-y-1">
@@ -286,9 +332,9 @@ export function WatchTogetherSection({
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
+                        className="inline-flex max-w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
                       >
-                        <TruncatedText text={track.title || track.originalUrl} className="flex-1" />
+                        <TruncatedText text={track.title || track.originalUrl} />
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (

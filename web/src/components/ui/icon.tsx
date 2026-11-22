@@ -2,7 +2,9 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  ArrowUpDown,
   ArrowUpToLine,
+  BarChart3,
   Bookmark,
   Check,
   ChevronDown,
@@ -12,32 +14,45 @@ import {
   Clock,
   Cookie,
   Copy,
+  CopyPlus,
+  Crown,
   Disc3,
   ExternalLink,
   Eye,
   EyeOff,
   FileAudio,
   FileText,
+  Filter,
+  Flame,
   Globe,
   GripVertical,
   Headphones,
+  Heart,
   Info,
   Link,
+  ListChecks,
   ListMusic,
+  ListPlus,
   Loader2,
   Lock,
   LogOut,
+  Medal,
+  MessageSquare,
   Mic,
+  Monitor,
   Moon,
   Music,
   Pause,
+  Pencil,
   Play,
   Plus,
   Radio,
   RefreshCw,
   Repeat,
   Repeat1,
+  RotateCcw,
   Save,
+  ScrollText,
   Search,
   Server,
   Settings,
@@ -48,7 +63,10 @@ import {
   Sparkles,
   Square,
   Sun,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
+  Trophy,
   Tv,
   Upload,
   User,
@@ -57,6 +75,7 @@ import {
   Volume2,
   VolumeX,
   X,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
@@ -65,7 +84,9 @@ const ICON_MAP = {
   'alert-triangle': AlertTriangle,
   'arrow-down': ArrowDown,
   'arrow-up': ArrowUp,
+  'arrow-up-down': ArrowUpDown,
   'arrow-up-to-line': ArrowUpToLine,
+  'bar-chart-3': BarChart3,
   bookmark: Bookmark,
   check: Check,
   'chevron-down': ChevronDown,
@@ -75,32 +96,45 @@ const ICON_MAP = {
   clock: Clock,
   cookie: Cookie,
   copy: Copy,
+  'copy-plus': CopyPlus,
+  crown: Crown,
   disc: Disc3,
   'external-link': ExternalLink,
   eye: Eye,
   'eye-off': EyeOff,
   'file-audio': FileAudio,
   'file-text': FileText,
+  filter: Filter,
+  flame: Flame,
   globe: Globe,
   'grip-vertical': GripVertical,
   headphones: Headphones,
+  heart: Heart,
   info: Info,
   link: Link,
+  'list-checks': ListChecks,
   'list-music': ListMusic,
+  'list-plus': ListPlus,
   loader: Loader2,
   lock: Lock,
   'log-out': LogOut,
+  medal: Medal,
+  'message-square': MessageSquare,
   mic: Mic,
+  monitor: Monitor,
   moon: Moon,
   music: Music,
   pause: Pause,
+  pencil: Pencil,
   play: Play,
   plus: Plus,
   radio: Radio,
   'refresh-cw': RefreshCw,
   repeat: Repeat,
   'repeat-1': Repeat1,
+  'rotate-ccw': RotateCcw,
   save: Save,
+  'scroll-text': ScrollText,
   search: Search,
   server: Server,
   settings: Settings,
@@ -111,7 +145,10 @@ const ICON_MAP = {
   sparkles: Sparkles,
   square: Square,
   sun: Sun,
+  'thumbs-down': ThumbsDown,
+  'thumbs-up': ThumbsUp,
   trash: Trash2,
+  trophy: Trophy,
   tv: Tv,
   upload: Upload,
   user: User,
@@ -120,6 +157,7 @@ const ICON_MAP = {
   'volume-2': Volume2,
   'volume-x': VolumeX,
   x: X,
+  zap: Zap,
 } as const satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICON_MAP;
@@ -138,17 +176,18 @@ export interface IconProps {
   name: IconName;
   size?: IconSize;
   strokeWidth?: number;
+  filled?: boolean;
   className?: string;
 }
 
-export function Icon({ name, size = 'sm', strokeWidth = 1.85, className }: IconProps) {
+export function Icon({ name, size = 'sm', strokeWidth = 1.85, filled = false, className }: IconProps) {
   const Component = ICON_MAP[name];
   return (
     <Component
       size={SIZE_MAP[size]}
       strokeWidth={strokeWidth}
       aria-hidden="true"
-      className={cn('shrink-0', className)}
+      className={cn('shrink-0', filled && 'fill-current', className)}
     />
   );
 }

@@ -12,6 +12,58 @@ export interface TooltipProps {
 const VIEWPORT_PADDING = 8;
 const OFFSET = 6;
 
+export function useHoverTooltip(content?: string, delayMs = 220) {
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [open, setOpen] = React.useState(false);
+  const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null);
+
+  const close = React.useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setOpen(false);
+  }, []);
+
+  const openFromElement = React.useCallback(
+    (el: HTMLElement | null) => {
+      if (!content || !el) return;
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        if (!el.isConnected) return;
+        setAnchorRect(el.getBoundingClientRect());
+        setOpen(true);
+      }, delayMs);
+    },
+    [content, delayMs]
+  );
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onDismiss = () => close();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('scroll', onDismiss, true);
+    window.addEventListener('resize', onDismiss);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('scroll', onDismiss, true);
+      window.removeEventListener('resize', onDismiss);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open, close]);
+
+  React.useEffect(() => () => close(), [close]);
+
+  return {
+    open: Boolean(content) && open,
+    anchorRect,
+    close,
+    openFromElement,
+  };
+}
+
 export function Tooltip({ content, anchorRect, open, className }: TooltipProps) {
   const tipRef = React.useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = React.useState<{ left: number; top: number; ready: boolean }>({

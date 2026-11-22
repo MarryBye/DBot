@@ -26,7 +26,7 @@ export function StatusIndicator({ tone, label, className }: StatusIndicatorProps
       )}
     >
       <span className={cn('h-2 w-2 shrink-0 rounded-[1px]', TONE_DOT[tone])} />
-      <TruncatedText text={label} className="min-w-0 flex-1" />
+      <TruncatedText text={label} className="min-w-0" />
     </span>
   );
 }

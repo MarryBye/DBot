@@ -1,4 +1,5 @@
 import { GuildMember, SlashCommandBuilder } from 'discord.js';
+import { actorFromDiscord, AuditLogService, toAuditTrack } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import type { Command } from '../types.js';
 
@@ -26,8 +27,22 @@ export const command: Command = {
     }
 
     const count = interaction.options.getInteger('count') ?? 1;
+    const skippedTracks = [
+      toAuditTrack(worker.queue.currentTrack),
+      ...worker.queue.tracks.slice(0, Math.max(0, count - 1)).map(toAuditTrack),
+    ];
     const skipped = worker.queue.skip(count);
     if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: member.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(interaction.user, member),
+        source: 'discord',
+        action: 'skip',
+        tracks: skippedTracks,
+      });
       workerPool.emitActivity({
         guildId: worker.currentGuildId,
         channelId: worker.currentChannelId,
@@ -54,8 +69,22 @@ export const command: Command = {
     const count = args[0] ? parseInt(args[0], 10) : 1;
     const safeCount = isNaN(count) || count < 1 ? 1 : count;
 
+    const skippedTracks = [
+      toAuditTrack(worker.queue.currentTrack),
+      ...worker.queue.tracks.slice(0, Math.max(0, safeCount - 1)).map(toAuditTrack),
+    ];
     const skipped = worker.queue.skip(safeCount);
     if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: message.member?.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(message.author, message.member),
+        source: 'discord',
+        action: 'skip',
+        tracks: skippedTracks,
+      });
       workerPool.emitActivity({
         guildId: worker.currentGuildId,
         channelId: worker.currentChannelId,

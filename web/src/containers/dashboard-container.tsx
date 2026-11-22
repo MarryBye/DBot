@@ -12,14 +12,22 @@ import type {
   AdminSectionId,
   AdminSettings,
   AppTab,
+  AuditLogFilterAction,
+  AuditLogQueryResult,
   AuthInfo,
   ChannelActivityEvent,
   CookiesStatus,
   CustomSound,
   DashboardState,
+  FavoriteTrackInput,
+  FavoriteTrackItem,
+  LeaderboardQueryResult,
+  LeaderboardSortBy,
+  LeaderboardSortDir,
   LoopMode,
   MemeRegion,
   MemeSound,
+  MyTracksTab,
   PlatformOption,
   SearchResultItem,
   SoundboardTab,
@@ -27,17 +35,28 @@ import type {
   ToastVariant,
   UserPlaylist,
 } from '@/types/api';
-import { safeHttpUrl } from '@/utils/format';
+import { buildTrackKey, safeHttpUrl } from '@/utils/format';
 import { AccessDeniedView } from '@/components/blocks/access-denied-view';
+import { AddToPlaylistModal } from '@/components/blocks/add-to-playlist-modal';
 import { AdminSection } from '@/components/blocks/admin-section';
 import { AgentsSection } from '@/components/blocks/agents-section';
+import { LeaderboardSection } from '@/components/blocks/leaderboard-section';
 import { LoadingView } from '@/components/blocks/loading-view';
 import { LoginView } from '@/components/blocks/login-view';
+import { LogsSection } from '@/components/blocks/logs-section';
 import { NowPlayingCard } from '@/components/blocks/now-playing-card';
+import {
+  PlaylistEditorModal,
+  type PlaylistEditorValues,
+} from '@/components/blocks/playlist-editor-modal';
 import { PlaylistsSection } from '@/components/blocks/playlists-section';
 import { QueueCard } from '@/components/blocks/queue-card';
+import {
+  SoundEditorModal,
+  type SoundEditorEditPayload,
+  type SoundEditorUploadPayload,
+} from '@/components/blocks/sound-editor-modal';
 import { SoundboardSection } from '@/components/blocks/soundboard-section';
-import type { SoundUploadPayload } from '@/components/blocks/sound-upload-form';
 import { TrackSearchBar } from '@/components/blocks/track-search-bar';
 import { WatchTogetherSection } from '@/components/blocks/watch-together-section';
 import { AuthShell } from '@/components/layout/auth-shell';
@@ -94,7 +113,8 @@ export function DashboardContainer() {
 
   const [state, setState] = React.useState<DashboardState | null>(null);
   const [activeTab, setActiveTab] = React.useState<AppTab>('player');
-  const [soundboardTab, setSoundboardTab] = React.useState<SoundboardTab>('custom');
+  const [myTracksTab, setMyTracksTab] = React.useState<MyTracksTab>('favorites');
+  const [soundboardTab, setSoundboardTab] = React.useState<SoundboardTab>('my');
   const [activeAdminSection, setActiveAdminSection] = React.useState<AdminSectionId>('access');
 
   // Player & search
@@ -118,12 +138,39 @@ export function DashboardContainer() {
   const [idleLeaveSec, setIdleLeaveSec] = React.useState<number | null>(null);
 
   // Data collections
-  const [playlists, setPlaylists] = React.useState<UserPlaylist[]>([]);
+  const [favorites, setFavorites] = React.useState<FavoriteTrackItem[]>([]);
+  const [isPlayingAllFavorites, setIsPlayingAllFavorites] = React.useState(false);
+  const [addingFavoriteId, setAddingFavoriteId] = React.useState<number | null>(null);
+  const favoriteTrackKeys = React.useMemo(
+    () => new Set(favorites.map((f) => f.trackKey)),
+    [favorites]
+  );
+
+  const [myPlaylists, setMyPlaylists] = React.useState<UserPlaylist[]>([]);
+  const [publicPlaylists, setPublicPlaylists] = React.useState<UserPlaylist[]>([]);
+  const playlistTrackKeys = React.useMemo(
+    () => new Set(myPlaylists.flatMap((pl) => pl.tracks.map((tr) => buildTrackKey(tr)))),
+    [myPlaylists]
+  );
   const [expandedPlaylists, setExpandedPlaylists] = React.useState<Set<number>>(() => new Set());
   const [isSavingPlaylist, setIsSavingPlaylist] = React.useState(false);
   const [loadingPlaylistId, setLoadingPlaylistId] = React.useState<number | null>(null);
+  const [copyingPlaylistId, setCopyingPlaylistId] = React.useState<number | null>(null);
+  const [playlistModal, setPlaylistModal] = React.useState<{
+    mode: 'create' | 'edit';
+    playlist?: UserPlaylist;
+  } | null>(null);
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = React.useState<FavoriteTrackInput | null>(
+    null
+  );
+  const [isAddingTrackToPlaylist, setIsAddingTrackToPlaylist] = React.useState(false);
 
-  const [customSounds, setCustomSounds] = React.useState<CustomSound[]>([]);
+  const [mySounds, setMySounds] = React.useState<CustomSound[]>([]);
+  const [publicSounds, setPublicSounds] = React.useState<CustomSound[]>([]);
+  const [soundModal, setSoundModal] = React.useState<{
+    mode: 'upload' | 'edit';
+    sound?: CustomSound;
+  } | null>(null);
   const [memes, setMemes] = React.useState<MemeSound[]>([]);
   const [memeRegion, setMemeRegion] = React.useState<MemeRegion>('ru');
   const [isLoadingMemes, setIsLoadingMemes] = React.useState(false);
@@ -137,6 +184,63 @@ export function DashboardContainer() {
   const [isSavingRole, setIsSavingRole] = React.useState(false);
   const [isApplyingCookies, setIsApplyingCookies] = React.useState(false);
   const [isReloadingCookies, setIsReloadingCookies] = React.useState(false);
+
+  // Action logs
+  const [logsResult, setLogsResult] = React.useState<AuditLogQueryResult | null>(null);
+  const [isLoadingLogs, setIsLoadingLogs] = React.useState(false);
+  const [logsPage, setLogsPage] = React.useState(1);
+  const [logsActionFilter, setLogsActionFilter] = React.useState<AuditLogFilterAction>('all');
+  const [logsActorIdFilter, setLogsActorIdFilter] = React.useState('all');
+  const [logsUserQuery, setLogsUserQuery] = React.useState('');
+  const [debouncedLogsUserQuery, setDebouncedLogsUserQuery] = React.useState('');
+  const [expandedLogIds, setExpandedLogIds] = React.useState<Set<number>>(() => new Set());
+
+  // Server leaderboard
+  const [leaderboardResult, setLeaderboardResult] = React.useState<LeaderboardQueryResult | null>(
+    null
+  );
+  const [isLoadingLeaderboard, setIsLoadingLeaderboard] = React.useState(false);
+  const [leaderboardPage, setLeaderboardPage] = React.useState(1);
+  const [leaderboardSortBy, setLeaderboardSortBy] = React.useState<LeaderboardSortBy>('score');
+  const [leaderboardSortDir, setLeaderboardSortDir] = React.useState<LeaderboardSortDir>('desc');
+  const [leaderboardSearch, setLeaderboardSearch] = React.useState('');
+  const [debouncedLeaderboardSearch, setDebouncedLeaderboardSearch] = React.useState('');
+  const leaderboardQueryRef = React.useRef<{
+    page: number;
+    sortBy: LeaderboardSortBy;
+    sortDir: LeaderboardSortDir;
+    search: string;
+  }>({
+    page: 1,
+    sortBy: 'score',
+    sortDir: 'desc',
+    search: '',
+  });
+  leaderboardQueryRef.current = {
+    page: leaderboardPage,
+    sortBy: leaderboardSortBy,
+    sortDir: leaderboardSortDir,
+    search: debouncedLeaderboardSearch,
+  };
+  const activeTabRef = React.useRef<AppTab>('player');
+  activeTabRef.current = activeTab;
+  const logsQueryRef = React.useRef<{
+    page: number;
+    action: AuditLogFilterAction;
+    actorId: string;
+    userQuery: string;
+  }>({
+    page: 1,
+    action: 'all',
+    actorId: 'all',
+    userQuery: '',
+  });
+  logsQueryRef.current = {
+    page: logsPage,
+    action: logsActionFilter,
+    actorId: logsActorIdFilter,
+    userQuery: debouncedLogsUserQuery,
+  };
 
   // Feedback
   const [toasts, setToasts] = React.useState<ToastMessage[]>([]);
@@ -266,8 +370,9 @@ export function DashboardContainer() {
 
   const loadCustomSounds = React.useCallback(async () => {
     try {
-      const list = await apiClient.listCustomSounds();
-      setCustomSounds(list);
+      const lib = await apiClient.listCustomSounds();
+      setMySounds(lib.mySounds);
+      setPublicSounds(lib.publicSounds);
     } catch {
       // Ignore transient errors
     }
@@ -275,8 +380,18 @@ export function DashboardContainer() {
 
   const loadPlaylists = React.useCallback(async () => {
     try {
-      const list = await apiClient.listPlaylists();
-      setPlaylists(list);
+      const lib = await apiClient.listPlaylists();
+      setMyPlaylists(lib.myPlaylists);
+      setPublicPlaylists(lib.publicPlaylists);
+    } catch {
+      // Ignore transient errors
+    }
+  }, []);
+
+  const loadFavorites = React.useCallback(async () => {
+    try {
+      const list = await apiClient.listFavorites();
+      setFavorites(list);
     } catch {
       // Ignore transient errors
     }
@@ -296,6 +411,60 @@ export function DashboardContainer() {
       }
     },
     [pushToast, t]
+  );
+
+  const loadLogs = React.useCallback(
+    async (override?: {
+      page?: number;
+      action?: AuditLogFilterAction;
+      actorId?: string;
+      userQuery?: string;
+    }) => {
+      const current = logsQueryRef.current;
+      setIsLoadingLogs(true);
+      try {
+        const res = await apiClient.getLogs({
+          page: override?.page ?? current.page,
+          pageSize: 15,
+          action: override?.action ?? current.action,
+          actorId: override?.actorId ?? current.actorId,
+          userQuery: override?.userQuery ?? current.userQuery,
+        });
+        setLogsResult(res);
+      } catch (err) {
+        pushToast(err instanceof Error ? err.message : tRef.current('error.generic'), 'danger');
+      } finally {
+        setIsLoadingLogs(false);
+      }
+    },
+    [pushToast]
+  );
+
+  const loadLeaderboard = React.useCallback(
+    async (override?: {
+      page?: number;
+      sortBy?: LeaderboardSortBy;
+      sortDir?: LeaderboardSortDir;
+      search?: string;
+    }) => {
+      const current = leaderboardQueryRef.current;
+      setIsLoadingLeaderboard(true);
+      try {
+        const res = await apiClient.getLeaderboard({
+          page: override?.page ?? current.page,
+          pageSize: 15,
+          sortBy: override?.sortBy ?? current.sortBy,
+          sortDir: override?.sortDir ?? current.sortDir,
+          search: override?.search ?? current.search,
+        });
+        setLeaderboardResult(res);
+      } catch (err) {
+        pushToast(err instanceof Error ? err.message : tRef.current('error.generic'), 'danger');
+      } finally {
+        setIsLoadingLeaderboard(false);
+      }
+    },
+    [pushToast]
   );
 
   const loadAdminData = React.useCallback(
@@ -330,6 +499,9 @@ export function DashboardContainer() {
       if (!next.user.isAdmin) {
         setActiveTab((tab) => (tab === 'admin' ? 'player' : tab));
       }
+      if (!next.user.canViewLogs) {
+        setActiveTab((tab) => (tab === 'logs' ? 'player' : tab));
+      }
 
       if (next.myWorker) {
         progressSyncRef.current = {
@@ -360,12 +532,25 @@ export function DashboardContainer() {
 
       if (prevGuildId && prevGuildId !== next.guildId) {
         loadCustomSounds();
+        loadPlaylists();
+        setLogsPage(1);
+        setLogsActorIdFilter('all');
+        setExpandedLogIds(new Set());
+        setLeaderboardPage(1);
+        setLeaderboardSearch('');
+        setDebouncedLeaderboardSearch('');
+        if (activeTabRef.current === 'logs') {
+          void loadLogs({ page: 1, actorId: 'all' });
+        }
+        if (activeTabRef.current === 'leaderboard') {
+          void loadLeaderboard({ page: 1, search: '' });
+        }
         if (next.user.isAdmin) {
           loadAdminData(next.user.canManageCookies);
         }
       }
     },
-    [loadAdminData, loadCustomSounds]
+    [loadAdminData, loadCustomSounds, loadLeaderboard, loadLogs, loadPlaylists]
   );
 
   const connectSession = React.useCallback(async () => {
@@ -377,16 +562,35 @@ export function DashboardContainer() {
       onState: applyDashboardState,
       onSounds: loadCustomSounds,
       onPlaylists: loadPlaylists,
+      onFavorites: loadFavorites,
+      onLogs: (guildId) => {
+        if (
+          activeTabRef.current === 'logs' &&
+          (!guildId || guildId === prevGuildIdRef.current)
+        ) {
+          void loadLogs();
+        }
+      },
       onActivity: handleChannelActivity,
     });
 
     loadCustomSounds();
     loadPlaylists();
+    loadFavorites();
     loadMemes('', 'ru');
     if (initialState.user.isAdmin) {
       loadAdminData(initialState.user.canManageCookies);
     }
-  }, [applyDashboardState, handleChannelActivity, loadAdminData, loadCustomSounds, loadMemes, loadPlaylists]);
+  }, [
+    applyDashboardState,
+    handleChannelActivity,
+    loadAdminData,
+    loadCustomSounds,
+    loadFavorites,
+    loadLogs,
+    loadMemes,
+    loadPlaylists,
+  ]);
 
   // Initial bootstrap
   React.useEffect(() => {
@@ -439,6 +643,61 @@ export function DashboardContainer() {
       void apiClient.setWatchPresence(false).catch(() => {});
     };
   }, [isWatchPresenceActive, state?.voice.channelId, state?.guildId]);
+
+  // Debounce log @username search input
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedLogsUserQuery(logsUserQuery.trim());
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [logsUserQuery]);
+
+  // Debounce leaderboard search input
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedLeaderboardSearch(leaderboardSearch.trim());
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [leaderboardSearch]);
+
+  // Reload logs when viewing Logs tab or changing filters/page
+  React.useEffect(() => {
+    if (view !== 'app' || activeTab !== 'logs' || !state?.user.canViewLogs) return;
+    void loadLogs({
+      page: logsPage,
+      action: logsActionFilter,
+      actorId: logsActorIdFilter,
+      userQuery: debouncedLogsUserQuery,
+    });
+  }, [
+    view,
+    activeTab,
+    state?.user.canViewLogs,
+    logsPage,
+    logsActionFilter,
+    logsActorIdFilter,
+    debouncedLogsUserQuery,
+    loadLogs,
+  ]);
+
+  // Reload leaderboard when viewing Leaderboard tab or changing sort/filter/page
+  React.useEffect(() => {
+    if (view !== 'app' || activeTab !== 'leaderboard') return;
+    void loadLeaderboard({
+      page: leaderboardPage,
+      sortBy: leaderboardSortBy,
+      sortDir: leaderboardSortDir,
+      search: debouncedLeaderboardSearch,
+    });
+  }, [
+    view,
+    activeTab,
+    leaderboardPage,
+    leaderboardSortBy,
+    leaderboardSortDir,
+    debouncedLeaderboardSearch,
+    loadLeaderboard,
+  ]);
 
   // Local 1-second tick for track progress and auto-leave countdowns
   React.useEffect(() => {
@@ -764,33 +1023,267 @@ export function DashboardContainer() {
     }
   };
 
+  const handleCopyText = async (value: string) => {
+    const text = value.trim();
+    if (!text) return;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(text);
+        pushToast(t('logs.copied'), 'info', 2200);
+      }
+    } catch {
+      // Clipboard access denied or unavailable
+    }
+  };
+
+  const handleToggleLogExpand = (id: number) => {
+    setExpandedLogIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleResetLogFilters = () => {
+    setLogsActionFilter('all');
+    setLogsActorIdFilter('all');
+    setLogsUserQuery('');
+    setDebouncedLogsUserQuery('');
+    setLogsPage(1);
+  };
+
+  const handleLeaderboardColumnSort = (col: LeaderboardSortBy) => {
+    if (leaderboardSortBy === col) {
+      setLeaderboardSortDir((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setLeaderboardSortBy(col);
+      setLeaderboardSortDir('desc');
+    }
+    setLeaderboardPage(1);
+  };
+
+  const handleResetLeaderboardFilters = () => {
+    setLeaderboardSortBy('score');
+    setLeaderboardSortDir('desc');
+    setLeaderboardSearch('');
+    setDebouncedLeaderboardSearch('');
+    setLeaderboardPage(1);
+  };
+
+  const handleViewMemberLogs = (userId: string) => {
+    if (!state?.user.canViewLogs) return;
+    setLogsActionFilter('all');
+    setLogsUserQuery('');
+    setDebouncedLogsUserQuery('');
+    setLogsActorIdFilter(userId);
+    setLogsPage(1);
+    setActiveTab('logs');
+  };
+
+  // Favorite tracks handlers
+  const handleToggleFavorite = async (track: FavoriteTrackInput) => {
+    try {
+      const res = await apiClient.toggleFavorite(track);
+      pushToast(res.favorited ? t('favorites.toastAdded') : t('favorites.toastRemoved'), 'info', 2500);
+      await loadFavorites();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    }
+  };
+
+  const handleRemoveFavorite = async (item: FavoriteTrackItem) => {
+    try {
+      await apiClient.removeFavorite(item.id);
+      pushToast(t('favorites.toastRemoved'), 'info', 2500);
+      await loadFavorites();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    }
+  };
+
+  const handlePlayFavorite = async (item: FavoriteTrackItem) => {
+    setAddingFavoriteId(item.id);
+    try {
+      const query = item.originalUrl || item.url || `${item.author} - ${item.title}`;
+      const res = await apiClient.playTrack(query, item.source);
+      const displayTitle =
+        res.track?.title && !/^https?:\/\//i.test(res.track.title) ? res.track.title : item.title;
+      if (res.isPlayingNow) {
+        pushToast(t('player.toastPlayingNow', { title: displayTitle }), 'success');
+      } else {
+        pushToast(t('player.toastQueued', { title: displayTitle }), 'success');
+      }
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setAddingFavoriteId(null);
+    }
+  };
+
+  const handleAddTrackToPlaylist = async (
+    playlist: UserPlaylist,
+    track: FavoriteTrackInput
+  ) => {
+    setIsAddingTrackToPlaylist(true);
+    try {
+      const res = await apiClient.addTrackToPlaylist(playlist.id, track);
+      if (res.alreadyExists) {
+        pushToast(t('playlists.toastTrackAlreadyIn', { name: res.playlist.name }), 'info');
+      } else {
+        pushToast(t('playlists.toastTrackAdded', { name: res.playlist.name }), 'success');
+      }
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setIsAddingTrackToPlaylist(false);
+    }
+  };
+
+  const handleRemoveTrackFromPlaylistModal = async (
+    playlist: UserPlaylist,
+    track: FavoriteTrackInput
+  ) => {
+    setIsAddingTrackToPlaylist(true);
+    try {
+      const trackKey = buildTrackKey(track);
+      const res = await apiClient.removeTrackFromPlaylist(playlist.id, { trackKey });
+      if (res.removed) {
+        pushToast(t('playlists.toastTrackRemoved', { name: res.playlist.name }), 'info');
+      }
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setIsAddingTrackToPlaylist(false);
+    }
+  };
+
+  const handleRemovePlaylistTrackByIndex = async (playlist: UserPlaylist, index: number) => {
+    setIsSavingPlaylist(true);
+    try {
+      const res = await apiClient.removeTrackFromPlaylist(playlist.id, { index });
+      if (res.removed) {
+        pushToast(t('playlists.toastTrackRemoved', { name: res.playlist.name }), 'info');
+      }
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setIsSavingPlaylist(false);
+    }
+  };
+
+  const handleCreatePlaylistWithTrack = async (
+    payload: { name: string; color: string; isPublic: boolean },
+    track: FavoriteTrackInput
+  ) => {
+    setIsAddingTrackToPlaylist(true);
+    try {
+      const created = await apiClient.createPlaylistWithTrack({
+        ...payload,
+        track,
+      });
+      pushToast(t('playlists.toastTrackAdded', { name: created.name }), 'success');
+      setAddToPlaylistTrack(null);
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setIsAddingTrackToPlaylist(false);
+    }
+  };
+
+  const handlePlayAllFavorites = async () => {
+    setIsPlayingAllFavorites(true);
+    try {
+      const res = await apiClient.playAllFavorites();
+      pushToast(t('favorites.toastPlayAll', { count: res.addedCount }), 'success');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setIsPlayingAllFavorites(false);
+    }
+  };
+
   // Playlist handlers
-  const handleSavePlaylist = async (name: string) => {
-    const trimmed = name.trim();
+  const handleSubmitPlaylistModal = async (values: PlaylistEditorValues) => {
+    const trimmed = values.name.trim();
     if (!trimmed) {
       pushToast(t('playlists.toastEmptyName'), 'danger');
       return;
     }
     setIsSavingPlaylist(true);
     try {
-      const res = await apiClient.savePlaylist(trimmed);
-      pushToast(
-        res.overwritten
-          ? t('playlists.toastUpdated', {
-              name: res.playlist.name,
-              count: res.playlist.trackCount,
-            })
-          : t('playlists.toastSaved', {
-              name: res.playlist.name,
-              count: res.playlist.trackCount,
-            }),
-        'success'
-      );
+      if (playlistModal?.mode === 'edit' && playlistModal.playlist) {
+        await apiClient.updatePlaylist(playlistModal.playlist.id, {
+          name: trimmed,
+          color: values.color,
+          isPublic: values.isPublic,
+        });
+        pushToast(t('playlists.toastUpdatedMeta'), 'success');
+      } else {
+        const res = await apiClient.savePlaylist({
+          name: trimmed,
+          color: values.color,
+          isPublic: values.isPublic,
+        });
+        pushToast(
+          res.overwritten
+            ? t('playlists.toastUpdated', {
+                name: res.playlist.name,
+                count: res.playlist.trackCount,
+              })
+            : t('playlists.toastSaved', {
+                name: res.playlist.name,
+                count: res.playlist.trackCount,
+              }),
+          'success'
+        );
+      }
+      setPlaylistModal(null);
       await loadPlaylists();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     } finally {
       setIsSavingPlaylist(false);
+    }
+  };
+
+  const handleTogglePlaylistPublic = async (playlist: UserPlaylist) => {
+    try {
+      const nextPublic = !playlist.isPublic;
+      await apiClient.updatePlaylist(playlist.id, { isPublic: nextPublic });
+      pushToast(
+        nextPublic ? t('playlists.toastMadePublic') : t('playlists.toastMadePrivate'),
+        'success'
+      );
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    }
+  };
+
+  const handleCopyPlaylist = async (playlist: UserPlaylist) => {
+    setCopyingPlaylistId(playlist.id);
+    try {
+      const copied = await apiClient.copyPlaylist(playlist.id, t('playlists.copySuffix'));
+      pushToast(t('playlists.toastCopied', { name: copied.name }), 'success');
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setCopyingPlaylistId(null);
+    }
+  };
+
+  const handleReactPlaylist = async (playlist: UserPlaylist, value: 1 | -1) => {
+    try {
+      await apiClient.reactPlaylist(playlist.id, value);
+      await loadPlaylists();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     }
   };
 
@@ -857,7 +1350,12 @@ export function DashboardContainer() {
     audioRef.current.play().catch(() => {});
   };
 
-  const handleUploadSound = async ({ name, color, file }: SoundUploadPayload) => {
+  const handleUploadSound = async ({
+    name,
+    color,
+    isPublic,
+    file,
+  }: SoundEditorUploadPayload) => {
     if (file.size > 10 * 1024 * 1024) {
       pushToast(t('soundboard.toastTooLarge'), 'danger');
       return;
@@ -875,17 +1373,61 @@ export function DashboardContainer() {
       await apiClient.uploadCustomSound({
         name,
         color,
+        isPublic,
         filename: file.name,
         mimeType: file.type,
         dataBase64,
       });
 
+      setSoundModal(null);
       pushToast(t('soundboard.toastUploaded', { name }), 'success');
       await loadCustomSounds();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     } finally {
       setIsUploadingSound(false);
+    }
+  };
+
+  const handleEditSoundSubmit = async (values: SoundEditorEditPayload) => {
+    if (!soundModal?.sound) return;
+    setIsUploadingSound(true);
+    try {
+      await apiClient.updateCustomSound(soundModal.sound.id, {
+        name: values.name,
+        color: values.color,
+        isPublic: values.isPublic,
+      });
+      setSoundModal(null);
+      pushToast(t('soundboard.toastUpdated'), 'success');
+      await loadCustomSounds();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    } finally {
+      setIsUploadingSound(false);
+    }
+  };
+
+  const handleToggleSoundPublic = async (sound: CustomSound) => {
+    try {
+      const nextPublic = !sound.isPublic;
+      await apiClient.updateCustomSound(sound.id, { isPublic: nextPublic });
+      pushToast(
+        nextPublic ? t('soundboard.toastMadePublic') : t('soundboard.toastMadePrivate'),
+        'success'
+      );
+      await loadCustomSounds();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    }
+  };
+
+  const handleReactSound = async (sound: CustomSound, value: 1 | -1) => {
+    try {
+      await apiClient.reactSound(sound.id, value);
+      await loadCustomSounds();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
     }
   };
 
@@ -964,6 +1506,7 @@ export function DashboardContainer() {
   const handleTabChange = (nextTab: string) => {
     const tab = nextTab as AppTab;
     if (tab === 'admin' && !state?.user.isAdmin) return;
+    if (tab === 'logs' && !state?.user.canViewLogs) return;
     handleCloseSearch();
     stopPreviewAudio();
     setActiveTab(tab);
@@ -978,6 +1521,7 @@ export function DashboardContainer() {
   const handleSaveAccessSettings = async (payload: {
     requiredRoleId: string | null;
     allowedChannelId: string | null;
+    logsAdminOnly: boolean;
   }) => {
     setIsSavingRole(true);
     try {
@@ -988,6 +1532,7 @@ export function DashboardContainer() {
               ...prev,
               requiredRoleId: payload.requiredRoleId,
               allowedChannelId: payload.allowedChannelId,
+              logsAdminOnly: payload.logsAdminOnly,
             }
           : prev
       );
@@ -1111,6 +1656,10 @@ export function DashboardContainer() {
   const queue = worker?.queue ?? [];
   const hasAnyTrack = Boolean(worker && (worker.currentTrack || queue.length > 0));
   const busyAgentsCount = Math.max(0, state.pool.totalCount - state.pool.availableCount);
+  const liveEditingPlaylist =
+    playlistModal?.mode === 'edit' && playlistModal.playlist
+      ? myPlaylists.find((p) => p.id === playlistModal.playlist!.id) ?? playlistModal.playlist
+      : undefined;
 
   return (
     <div className="flex min-h-screen flex-col overflow-x-clip bg-canvas text-fg-primary">
@@ -1134,10 +1683,11 @@ export function DashboardContainer() {
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="flex flex-1 flex-col">
         <NavTabs
-          playlistsCount={playlists.length}
+          playlistsCount={myPlaylists.length + favorites.length}
           busyAgentsCount={busyAgentsCount}
           totalAgentsCount={state.pool.totalCount}
           watchViewersCount={state.watchViewers?.length ?? 0}
+          canViewLogs={state.user.canViewLogs}
           isAdmin={state.user.isAdmin}
           t={t}
         />
@@ -1164,12 +1714,16 @@ export function DashboardContainer() {
               isSearching={isSearchingPage}
               addingResultId={addingResultId}
               addedResultIds={addedResultIds}
+              favoriteTrackKeys={favoriteTrackKeys}
+              playlistTrackKeys={playlistTrackKeys}
               t={t}
               onQueryChange={setSearchQuery}
               onPlatformChange={handlePlatformChange}
               onSearchSubmit={handleSearchSubmit}
               onDirectUrlSubmit={handleDirectUrlSubmit}
               onAddSearchResult={handleAddSearchResult}
+              onToggleFavorite={handleToggleFavorite}
+              onAddToPlaylist={setAddToPlaylistTrack}
               onOpenLink={handleOpenLink}
               onCopyLink={handleCopyLink}
               onPrevSearchPage={handlePrevSearchPage}
@@ -1185,6 +1739,8 @@ export function DashboardContainer() {
                 volume={localVolume}
                 emptyLeaveRemainSec={emptyLeaveSec}
                 idleLeaveRemainSec={idleLeaveSec}
+                favoriteTrackKeys={favoriteTrackKeys}
+                playlistTrackKeys={playlistTrackKeys}
                 t={t}
                 onTogglePause={handleTogglePause}
                 onSkip={handleSkip}
@@ -1192,6 +1748,8 @@ export function DashboardContainer() {
                 onCycleLoop={handleCycleLoop}
                 onStop={handleStop}
                 onVolumeChange={handleVolumeChange}
+                onToggleFavorite={handleToggleFavorite}
+                onAddToPlaylist={setAddToPlaylistTrack}
                 onOpenLink={handleOpenLink}
                 onCopyLink={handleCopyLink}
               />
@@ -1201,14 +1759,18 @@ export function DashboardContainer() {
                 canControl={inVoice && worker !== null}
                 canSavePlaylist={inVoice && hasAnyTrack}
                 isSavingPlaylist={isSavingPlaylist}
+                favoriteTrackKeys={favoriteTrackKeys}
+                playlistTrackKeys={playlistTrackKeys}
                 t={t}
                 onPlayTrackNow={handlePlayTrackNow}
                 onMoveTrack={handleMoveTrack}
                 onRemoveTrack={handleRemoveTrack}
+                onToggleFavorite={handleToggleFavorite}
+                onAddToPlaylist={setAddToPlaylistTrack}
                 onOpenLink={handleOpenLink}
                 onCopyLink={handleCopyLink}
                 onClearQueue={handleClearQueue}
-                onSavePlaylist={handleSavePlaylist}
+                onRequestSavePlaylist={() => setPlaylistModal({ mode: 'create' })}
               />
             </div>
           </TabsContent>
@@ -1220,23 +1782,44 @@ export function DashboardContainer() {
               worker={worker}
               currentProgressSec={progressSec}
               viewers={state.watchViewers ?? []}
+              favoriteTrackKeys={favoriteTrackKeys}
+              playlistTrackKeys={playlistTrackKeys}
               t={t}
+              onToggleFavorite={handleToggleFavorite}
+              onAddToPlaylist={setAddToPlaylistTrack}
             />
           </TabsContent>
 
           <TabsContent value="playlists">
             <PlaylistsSection
-              playlists={playlists}
+              activeSubTab={myTracksTab}
+              favorites={favorites}
+              myPlaylists={myPlaylists}
+              publicPlaylists={publicPlaylists}
+              playlistTrackKeys={playlistTrackKeys}
               inVoice={inVoice}
               canSaveQueue={inVoice && hasAnyTrack}
               isSaving={isSavingPlaylist}
+              isPlayingAllFavorites={isPlayingAllFavorites}
+              addingFavoriteId={addingFavoriteId}
               loadingPlaylistId={loadingPlaylistId}
+              copyingPlaylistId={copyingPlaylistId}
               expandedIds={expandedPlaylists}
               locale={locale}
               t={t}
-              onSaveQueue={handleSavePlaylist}
+              onSubTabChange={setMyTracksTab}
+              onPlayFavorite={handlePlayFavorite}
+              onPlayAllFavorites={handlePlayAllFavorites}
+              onRemoveFavorite={handleRemoveFavorite}
+              onAddTrackToPlaylist={setAddToPlaylistTrack}
+              onRequestSaveQueue={() => setPlaylistModal({ mode: 'create' })}
               onLoadPlaylist={handleLoadPlaylist}
+              onEditPlaylist={(pl) => setPlaylistModal({ mode: 'edit', playlist: pl })}
+              onTogglePlaylistPublic={handleTogglePlaylistPublic}
+              onCopyPlaylist={handleCopyPlaylist}
               onDeletePlaylist={handleDeletePlaylist}
+              onRemovePlaylistTrack={handleRemovePlaylistTrackByIndex}
+              onReactPlaylist={handleReactPlaylist}
               onToggleExpand={handleTogglePlaylistExpand}
               onOpenLink={handleOpenLink}
               onCopyLink={handleCopyLink}
@@ -1247,16 +1830,19 @@ export function DashboardContainer() {
             <SoundboardSection
               activeSubTab={soundboardTab}
               inVoice={inVoice}
-              customSounds={customSounds}
+              mySounds={mySounds}
+              publicSounds={publicSounds}
               memes={memes}
               memeRegion={memeRegion}
               isLoadingMemes={isLoadingMemes}
-              isUploading={isUploadingSound}
               playingSoundKey={playingSoundKey}
               savingMemeUrl={savingMemeUrl}
               t={t}
               onSubTabChange={setSoundboardTab}
-              onUploadSound={handleUploadSound}
+              onRequestUploadSound={() => setSoundModal({ mode: 'upload' })}
+              onEditCustomSound={(s) => setSoundModal({ mode: 'edit', sound: s })}
+              onToggleSoundPublic={handleToggleSoundPublic}
+              onReactCustomSound={handleReactSound}
               onPlayCustomSound={handlePlayCustomSound}
               onPreviewCustomSound={(s) => playPreviewUrl(`/api/soundboard/file/${s.id}`)}
               onDeleteCustomSound={handleDeleteCustomSound}
@@ -1277,6 +1863,75 @@ export function DashboardContainer() {
               onCopyLink={handleCopyLink}
             />
           </TabsContent>
+
+          <TabsContent value="leaderboard">
+            <LeaderboardSection
+              result={leaderboardResult}
+              currentUserId={state.user.id}
+              canViewLogs={state.user.canViewLogs}
+              isLoading={isLoadingLeaderboard}
+              sortBy={leaderboardSortBy}
+              sortDir={leaderboardSortDir}
+              searchQuery={leaderboardSearch}
+              t={t}
+              onSortByChange={(nextSortBy) => {
+                setLeaderboardSortBy(nextSortBy);
+                setLeaderboardPage(1);
+              }}
+              onToggleSortDir={() => {
+                setLeaderboardSortDir((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+                setLeaderboardPage(1);
+              }}
+              onColumnSortClick={handleLeaderboardColumnSort}
+              onSearchQueryChange={(nextQuery) => {
+                setLeaderboardSearch(nextQuery);
+                setLeaderboardPage(1);
+              }}
+              onResetFilters={handleResetLeaderboardFilters}
+              onRefresh={() => {
+                void loadLeaderboard();
+              }}
+              onPageChange={setLeaderboardPage}
+              onViewLogs={handleViewMemberLogs}
+              onCopyText={handleCopyText}
+            />
+          </TabsContent>
+
+          {state.user.canViewLogs && (
+            <TabsContent value="logs">
+              <LogsSection
+                result={logsResult}
+                isLoading={isLoadingLogs}
+                actionFilter={logsActionFilter}
+                actorIdFilter={logsActorIdFilter}
+                userQuery={logsUserQuery}
+                expandedIds={expandedLogIds}
+                locale={locale}
+                t={t}
+                onActionFilterChange={(nextAction) => {
+                  setLogsActionFilter(nextAction);
+                  setLogsPage(1);
+                }}
+                onActorIdFilterChange={(nextActorId) => {
+                  setLogsActorIdFilter(nextActorId);
+                  setLogsPage(1);
+                }}
+                onUserQueryChange={(nextQuery) => {
+                  setLogsUserQuery(nextQuery);
+                  setLogsPage(1);
+                }}
+                onResetFilters={handleResetLogFilters}
+                onRefresh={() => {
+                  void loadLogs();
+                }}
+                onPageChange={setLogsPage}
+                onToggleExpand={handleToggleLogExpand}
+                onOpenLink={handleOpenLink}
+                onCopyLink={handleCopyLink}
+                onCopyText={handleCopyText}
+              />
+            </TabsContent>
+          )}
 
           {state.user.isAdmin && (
             <TabsContent value="admin">
@@ -1315,6 +1970,55 @@ export function DashboardContainer() {
       </Tabs>
 
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+
+      <AddToPlaylistModal
+        open={addToPlaylistTrack !== null}
+        track={addToPlaylistTrack}
+        myPlaylists={myPlaylists}
+        isSubmitting={isAddingTrackToPlaylist}
+        t={t}
+        onSelectPlaylist={handleAddTrackToPlaylist}
+        onRemoveFromPlaylist={handleRemoveTrackFromPlaylistModal}
+        onCreateWithTrack={handleCreatePlaylistWithTrack}
+        onClose={() => setAddToPlaylistTrack(null)}
+      />
+
+      <PlaylistEditorModal
+        open={playlistModal !== null}
+        mode={playlistModal?.mode ?? 'create'}
+        initialValues={{
+          name: liveEditingPlaylist?.name ?? '',
+          color: liveEditingPlaylist?.color ?? '#0067b8',
+          isPublic: liveEditingPlaylist?.isPublic ?? false,
+        }}
+        tracks={liveEditingPlaylist?.tracks}
+        isSubmitting={isSavingPlaylist}
+        t={t}
+        onSubmit={handleSubmitPlaylistModal}
+        onRemoveTrack={
+          liveEditingPlaylist
+            ? (idx) => {
+                void handleRemovePlaylistTrackByIndex(liveEditingPlaylist, idx);
+              }
+            : undefined
+        }
+        onClose={() => setPlaylistModal(null)}
+      />
+
+      <SoundEditorModal
+        open={soundModal !== null}
+        mode={soundModal?.mode ?? 'upload'}
+        initialValues={{
+          name: soundModal?.sound?.name ?? '',
+          color: soundModal?.sound?.color ?? '#0067b8',
+          isPublic: soundModal?.sound?.isPublic ?? false,
+        }}
+        isSubmitting={isUploadingSound}
+        t={t}
+        onUpload={handleUploadSound}
+        onEdit={handleEditSoundSubmit}
+        onClose={() => setSoundModal(null)}
+      />
 
       <ConfirmDialog
         open={confirmState !== null}

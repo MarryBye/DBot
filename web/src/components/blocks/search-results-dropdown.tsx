@@ -1,5 +1,6 @@
 import type { TranslateFn } from '@/i18n';
-import type { SearchResultItem } from '@/types/api';
+import type { FavoriteTrackInput, SearchResultItem } from '@/types/api';
+import { buildTrackKey } from '@/utils/format';
 import { Button } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Icon } from '@/components/ui/icon';
@@ -16,9 +17,13 @@ export interface SearchResultsDropdownProps {
   isSearching: boolean;
   addingResultId: string | null;
   addedResultIds: ReadonlySet<string>;
+  favoriteTrackKeys: ReadonlySet<string>;
+  playlistTrackKeys: ReadonlySet<string>;
   disabled: boolean;
   t: TranslateFn;
   onAddResult: (result: SearchResultItem) => void;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
   onOpenLink: (url: string) => void;
   onCopyLink: (url: string) => void;
   onPrevPage: () => void;
@@ -35,9 +40,13 @@ export function SearchResultsDropdown({
   isSearching,
   addingResultId,
   addedResultIds,
+  favoriteTrackKeys,
+  playlistTrackKeys,
   disabled,
   t,
   onAddResult,
+  onToggleFavorite,
+  onAddToPlaylist,
   onOpenLink,
   onCopyLink,
   onPrevPage,
@@ -89,19 +98,31 @@ export function SearchResultsDropdown({
           />
         ) : (
           <>
-            {items.map((item) => (
-              <SearchResultRow
-                key={item.id}
-                result={item}
-                isAdded={addedResultIds.has(item.id)}
-                isAdding={addingResultId === item.id}
-                disabled={disabled}
-                t={t}
-                onAdd={onAddResult}
-                onOpenLink={onOpenLink}
-                onCopyLink={onCopyLink}
-              />
-            ))}
+            {items.map((item) => {
+              const key = buildTrackKey({
+                originalUrl: item.url,
+                source: item.source,
+                id: item.id,
+                title: item.title,
+              });
+              return (
+                <SearchResultRow
+                  key={item.id}
+                  result={item}
+                  isAdded={addedResultIds.has(item.id)}
+                  isAdding={addingResultId === item.id}
+                  isFavorite={favoriteTrackKeys.has(key)}
+                  isInPlaylist={playlistTrackKeys.has(key)}
+                  disabled={disabled}
+                  t={t}
+                  onAdd={onAddResult}
+                  onToggleFavorite={onToggleFavorite}
+                  onAddToPlaylist={onAddToPlaylist}
+                  onOpenLink={onOpenLink}
+                  onCopyLink={onCopyLink}
+                />
+              );
+            })}
 
             {isSearching && (
               <div className="flex items-center justify-center gap-2 rounded-[2px] border border-dashed border-border bg-subtle/40 py-2.5 text-xs text-fg-muted">

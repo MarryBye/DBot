@@ -2,6 +2,7 @@ import { Slot } from '@radix-ui/react-slot';
 import { cva, type VariantProps } from 'class-variance-authority';
 import * as React from 'react';
 import { cn } from '@/utils/cn';
+import { Tooltip, useHoverTooltip } from './tooltip';
 
 export const buttonVariants = cva(
   [
@@ -44,15 +45,57 @@ export interface ButtonProps
 }
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, type = 'button', ...props }, ref) => {
+  (
+    {
+      className,
+      variant,
+      size,
+      asChild = false,
+      type = 'button',
+      title,
+      onMouseEnter,
+      onMouseLeave,
+      onMouseDown,
+      onFocus,
+      onBlur,
+      ...props
+    },
+    ref
+  ) => {
     const Comp = asChild ? Slot : 'button';
+    const { open, anchorRect, close, openFromElement } = useHoverTooltip(title);
+
     return (
-      <Comp
-        ref={ref}
-        type={asChild ? undefined : type}
-        className={cn(buttonVariants({ variant, size }), className)}
-        {...props}
-      />
+      <>
+        <Comp
+          ref={ref}
+          type={asChild ? undefined : type}
+          aria-label={props['aria-label'] ?? (title && (size === 'icon' || size === 'icon-sm') ? title : undefined)}
+          className={cn(buttonVariants({ variant, size }), className)}
+          onMouseEnter={(e) => {
+            openFromElement(e.currentTarget);
+            onMouseEnter?.(e);
+          }}
+          onMouseLeave={(e) => {
+            close();
+            onMouseLeave?.(e);
+          }}
+          onMouseDown={(e) => {
+            close();
+            onMouseDown?.(e);
+          }}
+          onFocus={(e) => {
+            openFromElement(e.currentTarget);
+            onFocus?.(e);
+          }}
+          onBlur={(e) => {
+            close();
+            onBlur?.(e);
+          }}
+          {...props}
+        />
+        {title && <Tooltip content={title} anchorRect={anchorRect} open={open} />}
+      </>
     );
   }
 );

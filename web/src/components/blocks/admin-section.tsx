@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { SidebarNav, type SidebarNavItem } from '@/components/ui/sidebar-nav';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 
 const EVERYONE_VALUE = '__everyone__';
@@ -34,6 +35,7 @@ export interface AdminSectionProps {
   onSaveAccessSettings: (payload: {
     requiredRoleId: string | null;
     allowedChannelId: string | null;
+    logsAdminOnly: boolean;
   }) => void;
   onApplyCookies: (content: string) => Promise<boolean>;
   onReloadCookies: () => void;
@@ -66,6 +68,9 @@ export function AdminSection({
   const [selectedChannel, setSelectedChannel] = React.useState<string>(
     settings?.allowedChannelId ?? ALL_CHANNELS_VALUE
   );
+  const [logsAdminOnly, setLogsAdminOnly] = React.useState<boolean>(
+    Boolean(settings?.logsAdminOnly)
+  );
   const [cookiesText, setCookiesText] = React.useState('');
   const [cookiesFileName, setCookiesFileName] = React.useState<string | null>(null);
   const [pickerKey, setPickerKey] = React.useState(0);
@@ -77,6 +82,10 @@ export function AdminSection({
   React.useEffect(() => {
     setSelectedChannel(settings?.allowedChannelId ?? ALL_CHANNELS_VALUE);
   }, [settings?.allowedChannelId]);
+
+  React.useEffect(() => {
+    setLogsAdminOnly(Boolean(settings?.logsAdminOnly));
+  }, [settings?.logsAdminOnly]);
 
   const navItems: SidebarNavItem<AdminSectionId>[] = [
     { id: 'access', label: t('admin.navAccess'), icon: 'shield' },
@@ -93,6 +102,7 @@ export function AdminSection({
     onSaveAccessSettings({
       requiredRoleId: selectedRole === EVERYONE_VALUE ? null : selectedRole,
       allowedChannelId: selectedChannel === ALL_CHANNELS_VALUE ? null : selectedChannel,
+      logsAdminOnly,
     });
   };
 
@@ -199,6 +209,28 @@ export function AdminSection({
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div className="flex items-start justify-between gap-4 rounded-[2px] border border-border bg-subtle/40 p-3">
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <label
+                      htmlFor="admin-logs-admin-only"
+                      className="block cursor-pointer text-xs font-semibold text-fg-primary"
+                    >
+                      {t('admin.logsAdminOnlyLabel')}
+                    </label>
+                    <p className="text-xs leading-relaxed text-fg-muted">
+                      {t('admin.logsAdminOnlyDescription')}
+                    </p>
+                  </div>
+                  <Switch
+                    id="admin-logs-admin-only"
+                    checked={logsAdminOnly}
+                    disabled={isSavingAccess}
+                    ariaLabel={t('admin.logsAdminOnlyLabel')}
+                    onCheckedChange={setLogsAdminOnly}
+                    className="mt-0.5"
+                  />
                 </div>
 
                 <Button type="submit" variant="primary" disabled={isSavingAccess}>

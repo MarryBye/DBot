@@ -1,4 +1,5 @@
 import { GuildMember, SlashCommandBuilder } from 'discord.js';
+import { actorFromDiscord, AuditLogService } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import type { Command } from '../types.js';
 
@@ -31,6 +32,26 @@ export const command: Command = {
 
     const mode = interaction.options.getString('mode', true) as 'off' | 'track' | 'queue';
     worker.queue.setLoop(mode);
+    if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: member.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(interaction.user, member),
+        source: 'discord',
+        action: 'loop',
+        details: { loopMode: mode },
+      });
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'loop',
+        actorId: interaction.user.id,
+        actorName: member.displayName || interaction.user.username,
+        detail: mode,
+      });
+    }
 
     let modeText = 'выключен';
     if (mode === 'track') modeText = 'повтор одного трека 🔂';
@@ -56,6 +77,26 @@ export const command: Command = {
 
     const mode = choice as 'off' | 'track' | 'queue';
     worker.queue.setLoop(mode);
+    if (worker.currentGuildId && worker.currentChannelId) {
+      void AuditLogService.record({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        channelName: message.member?.voice.channel?.name ?? null,
+        workerId: worker.id,
+        actor: actorFromDiscord(message.author, message.member),
+        source: 'discord',
+        action: 'loop',
+        details: { loopMode: mode },
+      });
+      workerPool.emitActivity({
+        guildId: worker.currentGuildId,
+        channelId: worker.currentChannelId,
+        action: 'loop',
+        actorId: message.author.id,
+        actorName: message.member?.displayName || message.author.username,
+        detail: mode,
+      });
+    }
 
     let modeText = 'выключен';
     if (mode === 'track') modeText = 'повтор одного трека 🔂';

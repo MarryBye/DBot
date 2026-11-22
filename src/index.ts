@@ -1,6 +1,7 @@
 import { Client, Events, GatewayIntentBits, MessageFlags, PermissionFlagsBits, type GuildMember } from 'discord.js';
 import { config } from './config.js';
 import { commandMap } from './commands/index.js';
+import { LeaderboardService } from './services/leaderboard.js';
 import { workerPool } from './voice/index.js';
 import { getAllowedChannelId } from './web/auth.js';
 import { startWebServer } from './web/server.js';
@@ -29,6 +30,9 @@ client.once(Events.ClientReady, async (readyClient) => {
 
   // Запуск пула голосовых воркеров
   await workerPool.init();
+
+  // Запуск учёта статистики участников (время в войсе с ботом + саундборд)
+  LeaderboardService.startTracking(readyClient);
 
   // Запуск встроенного веб-сервера панели управления
   startWebServer(readyClient);

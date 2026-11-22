@@ -1,4 +1,5 @@
 import { GuildMember, SlashCommandBuilder } from 'discord.js';
+import { actorFromDiscord, AuditLogService } from '../services/audit-log.js';
 import { workerPool } from '../voice/index.js';
 import type { Command } from '../types.js';
 
@@ -34,6 +35,15 @@ export const command: Command = {
         voiceChannel.id,
         interaction.guildId!
       );
+      void AuditLogService.record({
+        guildId: interaction.guildId!,
+        channelId: voiceChannel.id,
+        channelName: voiceChannel.name,
+        workerId: worker.id,
+        actor: actorFromDiscord(interaction.user, member),
+        source: 'discord',
+        action: 'summon',
+      });
       await interaction.editReply(
         `✅ **Воркер #${worker.id}** (${worker.client.user?.tag}) подключился к каналу **${voiceChannel.name}**!`
       );
@@ -65,6 +75,15 @@ export const command: Command = {
         voiceChannel.id,
         message.guildId!
       );
+      void AuditLogService.record({
+        guildId: message.guildId!,
+        channelId: voiceChannel.id,
+        channelName: voiceChannel.name,
+        workerId: worker.id,
+        actor: actorFromDiscord(message.author, member),
+        source: 'discord',
+        action: 'summon',
+      });
       await statusMsg.edit(
         `✅ **Воркер #${worker.id}** (${worker.client.user?.tag}) подключился к каналу **${voiceChannel.name}**!`
       );

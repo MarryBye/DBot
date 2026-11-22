@@ -5,6 +5,10 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { config } from '../config.js';
 import { soundsDir } from '../db/index.js';
+import { AuditLogService, toAuditTrack } from '../services/audit-log.js';
+import { LeaderboardService } from '../services/leaderboard.js';
+import { ReactionService, type ReactionVote } from '../services/reactions.js';
+import { FavoriteService, type FavoriteTrackInput } from '../voice/favorites.js';
 import { workerPool, type ChannelActivityEvent } from '../voice/index.js';
 import { MusicResolver, type PlatformOption, type Track } from '../voice/music-resolver.js';
 import { PlaylistService } from '../voice/playlists.js';
@@ -342,6 +346,7 @@ async function buildUserStatePayload(
       inGuild: ctx.inGuild,
       isAdmin: ctx.isAdmin,
       canManageCookies: ctx.canManageCookies,
+      canViewLogs: ctx.canViewLogs,
       hasAccess: ctx.hasAccess,
       requiredRoleId: ctx.requiredRoleId,
       requiredRoleName: ctx.requiredRoleName,
@@ -437,6 +442,27 @@ export function startWebServer(discordClient: Client): http.Server {
     const payload = `event: playlists\ndata: ${JSON.stringify({ updatedAt: Date.now() })}\n\n`;
     for (const c of sseClients) {
       if (userId && c.userId !== userId) continue;
+      try {
+        c.res.write(payload);
+      } catch {
+        sseClients.delete(c);
+      }
+    }
+  });
+  workerPool.events.on('favoritesChanged', (userId?: string) => {
+    const payload = `event: favorites\ndata: ${JSON.stringify({ updatedAt: Date.now() })}\n\n`;
+    for (const c of sseClients) {
+      if (userId && c.userId !== userId) continue;
+      try {
+        c.res.write(payload);
+      } catch {
+        sseClients.delete(c);
+      }
+    }
+  });
+  workerPool.events.on('logsChanged', (guildId?: string) => {
+    const payload = `event: logs\ndata: ${JSON.stringify({ guildId: guildId ?? null, updatedAt: Date.now() })}\n\n`;
+    for (const c of sseClients) {
       try {
         c.res.write(payload);
       } catch {
@@ -734,6 +760,67 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         const activeGuildId = ctx.guildId;
+        const webActor = {
+          id: session.userId,
+          username: ctx.username,
+          displayName: ctx.displayName,
+          avatarUrl: ctx.avatarUrl,
+        };
+
+        // ---- Рейтинг активности участников на активном сервере ----
+        if (pathname === '/api/leaderboard' && method === 'GET') {
+          const page = Number(url.searchParams.get('page')) || 1;
+          const pageSize = Number(url.searchParams.get('pageSize')) || 15;
+          const sortBy = url.searchParams.get('sortBy') || 'score';
+          const sortDir = url.searchParams.get('sortDir') || 'desc';
+          const search = url.searchParams.get('q') || '';
+
+          const result = await LeaderboardService.query({
+            guildId: activeGuildId,
+            viewerUserId: session.userId,
+            page,
+            pageSize,
+            sortBy,
+            sortDir,
+            search,
+            discordClient,
+          });
+          sendJson(res, 200, result);
+          return;
+        }
+
+        // ---- Логи действий пользователей на активном сервере ----
+        if (pathname === '/api/logs' && method === 'GET') {
+          const guildSettings = await getGuildSettings(activeGuildId);
+          if (guildSettings.logsAdminOnly) {
+            const liveAdmin = await verifyLiveGuildAdmin(
+              discordClient,
+              activeGuildId,
+              session.userId
+            );
+            if (!liveAdmin) {
+              sendJson(res, 403, { error: 'Просмотр логов разрешён только администраторам сервера.' });
+              return;
+            }
+          }
+          const page = Number(url.searchParams.get('page')) || 1;
+          const pageSize = Number(url.searchParams.get('pageSize')) || 15;
+          const action = url.searchParams.get('action') || 'all';
+          const actorId = url.searchParams.get('actorId') || 'all';
+          const userQuery = url.searchParams.get('userQuery') || '';
+
+          const result = await AuditLogService.query({
+            guildId: activeGuildId,
+            page,
+            pageSize,
+            action,
+            actorId,
+            userQuery,
+            discordClient,
+          });
+          sendJson(res, 200, result);
+          return;
+        }
 
         // ---- Настройки администратора (роль доступа и разрешённый текстовый канал для активного сервера) ----
         // На всех /api/admin/* выполняем ЖИВУЮ проверку прав Администратора в Discord API (force: true)!
@@ -768,6 +855,7 @@ export function startWebServer(discordClient: Client): http.Server {
           sendJson(res, 200, {
             requiredRoleId: guildSettings.requiredRoleId,
             allowedChannelId: guildSettings.allowedChannelId,
+            logsAdminOnly: guildSettings.logsAdminOnly,
             roles,
             channels,
           });
@@ -783,10 +871,15 @@ export function startWebServer(discordClient: Client): http.Server {
           const body = await readJsonBody<{
             requiredRoleId?: string | null;
             allowedChannelId?: string | null;
+            logsAdminOnly?: boolean;
           }>(req);
 
           const guild = discordClient.guilds.cache.get(activeGuildId);
-          const patch: { requiredRoleId?: string | null; allowedChannelId?: string | null } = {};
+          const patch: {
+            requiredRoleId?: string | null;
+            allowedChannelId?: string | null;
+            logsAdminOnly?: boolean;
+          } = {};
 
           if ('requiredRoleId' in body) {
             const roleId = body.requiredRoleId ? String(body.requiredRoleId).trim() : null;
@@ -824,12 +917,36 @@ export function startWebServer(discordClient: Client): http.Server {
             patch.allowedChannelId = channelId;
           }
 
+          if ('logsAdminOnly' in body) {
+            patch.logsAdminOnly = Boolean(body.logsAdminOnly);
+          }
+
           const updated = await setGuildSettings(activeGuildId, patch);
+          const roleName = updated.requiredRoleId
+            ? guild?.roles.cache.get(updated.requiredRoleId)?.name ?? null
+            : null;
+          const channelName = updated.allowedChannelId
+            ? guild?.channels.cache.get(updated.allowedChannelId)?.name ?? null
+            : null;
+          void AuditLogService.record({
+            guildId: activeGuildId,
+            actor: webActor,
+            source: 'web',
+            action: 'settings_update',
+            details: {
+              requiredRoleId: updated.requiredRoleId,
+              requiredRoleName: roleName,
+              allowedChannelId: updated.allowedChannelId,
+              allowedChannelName: channelName,
+              logsAdminOnly: updated.logsAdminOnly,
+            },
+          });
           workerPool.events.emit('stateChanged');
           sendJson(res, 200, {
             ok: true,
             requiredRoleId: updated.requiredRoleId,
             allowedChannelId: updated.allowedChannelId,
+            logsAdminOnly: updated.logsAdminOnly,
           });
           return;
         }
@@ -860,6 +977,16 @@ export function startWebServer(discordClient: Client): http.Server {
           try {
             const actor = `${ctx.displayName} (${session.userId})`;
             const result = MusicResolver.updateCookies(content, actor);
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              actor: webActor,
+              source: 'web',
+              action: 'cookies_update',
+              details: {
+                cookiesOp: 'uploaded',
+                cookiesLineCount: result.lineCount,
+              },
+            });
             sendJson(res, 200, {
               ok: true,
               status: {
@@ -892,6 +1019,16 @@ export function startWebServer(discordClient: Client): http.Server {
           try {
             const actor = `${ctx.displayName} (${session.userId})`;
             const status = MusicResolver.reloadCookiesFromDisk(actor);
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              actor: webActor,
+              source: 'web',
+              action: 'cookies_update',
+              details: {
+                cookiesOp: 'reloaded',
+                cookiesLineCount: status.lineCount,
+              },
+            });
             sendJson(res, 200, { ok: true, status });
           } catch (err: any) {
             sendJson(res, 400, {
@@ -913,6 +1050,15 @@ export function startWebServer(discordClient: Client): http.Server {
           }
           const actor = `${ctx.displayName} (${session.userId})`;
           const status = MusicResolver.clearCookies(actor);
+          void AuditLogService.record({
+            guildId: activeGuildId,
+            actor: webActor,
+            source: 'web',
+            action: 'cookies_update',
+            details: {
+              cookiesOp: 'cleared',
+            },
+          });
           sendJson(res, 200, { ok: true, status });
           return;
         }
@@ -1024,10 +1170,223 @@ export function startWebServer(discordClient: Client): http.Server {
           return;
         }
 
-        // ---- Личные сохранённые плейлисты (просмотр и удаление доступны даже вне войса) ----
+        // ---- Любимые треки пользователя ----
+        if (pathname === '/api/favorites' && method === 'GET') {
+          const favorites = await FavoriteService.list(session.userId);
+          sendJson(res, 200, { favorites });
+          return;
+        }
+
+        if (pathname === '/api/favorites/toggle' && method === 'POST') {
+          const body = await readJsonBody<FavoriteTrackInput>(req);
+          try {
+            const result = await FavoriteService.toggle(session.userId, body);
+            workerPool.events.emit('favoritesChanged', session.userId);
+            sendJson(res, 200, { ok: true, ...result });
+          } catch (err: any) {
+            sendJson(res, 400, { error: redactSensitiveText(err?.message || 'Ошибка избранного.') });
+          }
+          return;
+        }
+
+        const deleteFavMatch = pathname.match(/^\/api\/favorites\/(\d+)$/);
+        if (deleteFavMatch && method === 'DELETE') {
+          const id = Number(deleteFavMatch[1]);
+          const removed = await FavoriteService.removeById(session.userId, id);
+          if (!removed) {
+            sendJson(res, 404, { error: 'Трек не найден в любимых.' });
+            return;
+          }
+          workerPool.events.emit('favoritesChanged', session.userId);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // ---- Личные и публичные плейлисты (просмотр, редактирование, копирование и оценки доступны вне войса) ----
         if (pathname === '/api/playlists' && method === 'GET') {
-          const playlists = await PlaylistService.listUserPlaylists(session.userId);
-          sendJson(res, 200, { playlists });
+          const [myPlaylists, publicPlaylists] = await Promise.all([
+            PlaylistService.listUserPlaylists(session.userId),
+            PlaylistService.listPublicPlaylists(activeGuildId, session.userId),
+          ]);
+          sendJson(res, 200, { myPlaylists, publicPlaylists, playlists: myPlaylists });
+          return;
+        }
+
+        const updatePlaylistMatch = pathname.match(/^\/api\/playlists\/(\d+)$/);
+        if (updatePlaylistMatch && method === 'PATCH') {
+          const id = Number(updatePlaylistMatch[1]);
+          const body = await readJsonBody<{
+            name?: string;
+            color?: string;
+            isPublic?: boolean;
+          }>(req);
+          try {
+            const updated = await PlaylistService.updatePlaylist({
+              userId: session.userId,
+              guildId: activeGuildId,
+              authorName: ctx.displayName,
+              authorUsername: ctx.username,
+              id,
+              name: body.name,
+              color: body.color,
+              isPublic: body.isPublic,
+            });
+            if (!updated) {
+              sendJson(res, 404, { error: 'Плейлист не найден или у вас нет прав на его изменение.' });
+              return;
+            }
+            workerPool.events.emit('playlistsChanged');
+            sendJson(res, 200, { ok: true, playlist: updated });
+          } catch (err: any) {
+            sendJson(res, 400, { error: redactSensitiveText(err?.message || 'Не удалось обновить плейлист.') });
+          }
+          return;
+        }
+
+        const copyPlaylistMatch = pathname.match(/^\/api\/playlists\/(\d+)\/copy$/);
+        if (copyPlaylistMatch && method === 'POST') {
+          const id = Number(copyPlaylistMatch[1]);
+          const body = await readJsonBody<{ copySuffix?: string }>(req);
+          try {
+            const copied = await PlaylistService.copyPlaylistToUser({
+              sourceId: id,
+              guildId: activeGuildId,
+              userId: session.userId,
+              authorName: ctx.displayName,
+              authorUsername: ctx.username,
+              copySuffix: body.copySuffix,
+            });
+            workerPool.events.emit('playlistsChanged', session.userId);
+            sendJson(res, 201, { ok: true, playlist: copied });
+          } catch (err: any) {
+            sendJson(res, 400, { error: redactSensitiveText(err?.message || 'Не удалось скопировать плейлист.') });
+          }
+          return;
+        }
+
+        const addTrackPlaylistMatch = pathname.match(/^\/api\/playlists\/(\d+)\/tracks$/);
+        if (addTrackPlaylistMatch && method === 'POST') {
+          const id = Number(addTrackPlaylistMatch[1]);
+          const body = await readJsonBody<{ track?: FavoriteTrackInput }>(req);
+          if (!body.track) {
+            sendJson(res, 400, { error: 'Не переданы данные трека.' });
+            return;
+          }
+          try {
+            const resData = await PlaylistService.addTrackToPlaylist({
+              userId: session.userId,
+              playlistId: id,
+              track: body.track,
+            });
+            if (!resData) {
+              sendJson(res, 404, { error: 'Плейлист не найден или у вас нет прав на его изменение.' });
+              return;
+            }
+            workerPool.events.emit(
+              'playlistsChanged',
+              resData.playlist.isPublic ? undefined : session.userId
+            );
+            sendJson(res, 200, { ok: true, ...resData });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось добавить трек в плейлист.'),
+            });
+          }
+          return;
+        }
+
+        const removeTrackPlaylistMatch = pathname.match(
+          /^\/api\/playlists\/(\d+)\/tracks\/remove$/
+        );
+        if (removeTrackPlaylistMatch && method === 'POST') {
+          const id = Number(removeTrackPlaylistMatch[1]);
+          const body = await readJsonBody<{ trackKey?: string; index?: number }>(req);
+          try {
+            const resData = await PlaylistService.removeTrackFromPlaylist({
+              userId: session.userId,
+              playlistId: id,
+              trackKey: typeof body.trackKey === 'string' ? body.trackKey : undefined,
+              index: typeof body.index === 'number' ? body.index : undefined,
+            });
+            if (!resData) {
+              sendJson(res, 404, {
+                error: 'Плейлист не найден или у вас нет прав на его изменение.',
+              });
+              return;
+            }
+            workerPool.events.emit(
+              'playlistsChanged',
+              resData.playlist.isPublic ? undefined : session.userId
+            );
+            sendJson(res, 200, { ok: true, ...resData });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось удалить трек из плейлиста.'),
+            });
+          }
+          return;
+        }
+
+        if (pathname === '/api/playlists/create-with-track' && method === 'POST') {
+          const body = await readJsonBody<{
+            name?: string;
+            color?: string;
+            isPublic?: boolean;
+            track?: FavoriteTrackInput;
+          }>(req);
+          if (!body.name?.trim() || !body.track) {
+            sendJson(res, 400, { error: 'Укажите название плейлиста и трек.' });
+            return;
+          }
+          try {
+            const created = await PlaylistService.createPlaylistWithTrack({
+              userId: session.userId,
+              guildId: activeGuildId,
+              authorName: ctx.displayName,
+              authorUsername: ctx.username,
+              name: body.name,
+              color: body.color,
+              isPublic: body.isPublic,
+              track: body.track,
+            });
+            workerPool.events.emit(
+              'playlistsChanged',
+              created.isPublic ? undefined : session.userId
+            );
+            sendJson(res, 201, { ok: true, playlist: created });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось создать плейлист.'),
+            });
+          }
+          return;
+        }
+
+        const reactPlaylistMatch = pathname.match(/^\/api\/playlists\/(\d+)\/react$/);
+        if (reactPlaylistMatch && method === 'POST') {
+          const id = Number(reactPlaylistMatch[1]);
+          const body = await readJsonBody<{ value?: number }>(req);
+          const rawVal = Number(body.value);
+          const value: ReactionVote = rawVal === 1 ? 1 : rawVal === -1 ? -1 : 0;
+
+          const target = await PlaylistService.getAccessiblePlaylistById(
+            activeGuildId,
+            session.userId,
+            id
+          );
+          if (!target || !target.isPublic || target.guildId !== activeGuildId) {
+            sendJson(res, 404, { error: 'Публичный плейлист не найден.' });
+            return;
+          }
+
+          const summary = await ReactionService.setVote({
+            targetType: 'playlist',
+            targetId: id,
+            userId: session.userId,
+            value,
+          });
+          workerPool.events.emit('playlistsChanged');
+          sendJson(res, 200, { ok: true, ...summary });
           return;
         }
 
@@ -1036,18 +1395,21 @@ export function startWebServer(discordClient: Client): http.Server {
           const id = Number(deletePlaylistMatch[1]);
           const deleted = await PlaylistService.deletePlaylist(session.userId, id);
           if (!deleted) {
-            sendJson(res, 404, { error: 'Плейлист не найден.' });
+            sendJson(res, 404, { error: 'Плейлист не найден или у вас нет прав на его удаление.' });
             return;
           }
-          workerPool.events.emit('playlistsChanged', session.userId);
+          workerPool.events.emit('playlistsChanged', deleted.isPublic ? undefined : session.userId);
           sendJson(res, 200, { ok: true, deleted });
           return;
         }
 
         // ---- Саундборд ----
         if (pathname === '/api/soundboard/custom' && method === 'GET') {
-          const list = await SoundboardService.listCustomSounds(activeGuildId);
-          sendJson(res, 200, { sounds: list });
+          const { mySounds, publicSounds } = await SoundboardService.listSoundsForWeb(
+            activeGuildId,
+            session.userId
+          );
+          sendJson(res, 200, { mySounds, publicSounds, sounds: publicSounds });
           return;
         }
 
@@ -1072,6 +1434,7 @@ export function startWebServer(discordClient: Client): http.Server {
             dataBase64?: string;
             color?: string;
             emoji?: string;
+            isPublic?: boolean;
           }>(req, 15 * 1024 * 1024);
 
           if (!body.name || !body.dataBase64) {
@@ -1092,8 +1455,10 @@ export function startWebServer(discordClient: Client): http.Server {
               originalFilename: body.filename || 'sound.mp3',
               color: body.color,
               emoji: body.emoji,
+              isPublic: body.isPublic !== undefined ? Boolean(body.isPublic) : false,
               uploadedById: session.userId,
               uploadedByTag: ctx.displayName,
+              uploadedByUsername: ctx.username,
             });
 
             workerPool.events.emit('soundsChanged');
@@ -1114,6 +1479,7 @@ export function startWebServer(discordClient: Client): http.Server {
             url?: string;
             color?: string;
             emoji?: string;
+            isPublic?: boolean;
           }>(req);
 
           if (!body.name || !body.url) {
@@ -1128,8 +1494,10 @@ export function startWebServer(discordClient: Client): http.Server {
               url: body.url,
               color: body.color,
               emoji: body.emoji || '😂',
+              isPublic: body.isPublic !== undefined ? Boolean(body.isPublic) : false,
               uploadedById: session.userId,
               uploadedByTag: ctx.displayName,
+              uploadedByUsername: ctx.username,
             });
 
             workerPool.events.emit('soundsChanged');
@@ -1140,12 +1508,69 @@ export function startWebServer(discordClient: Client): http.Server {
           return;
         }
 
+        const updateSoundMatch = pathname.match(/^\/api\/soundboard\/custom\/(\d+)$/);
+        if (updateSoundMatch && method === 'PATCH') {
+          const id = Number(updateSoundMatch[1]);
+          const body = await readJsonBody<{
+            name?: string;
+            color?: string;
+            isPublic?: boolean;
+          }>(req);
+          try {
+            const updated = await SoundboardService.updateCustomSound({
+              guildId: activeGuildId,
+              userId: session.userId,
+              id,
+              name: body.name,
+              color: body.color,
+              isPublic: body.isPublic,
+            });
+            if (!updated) {
+              sendJson(res, 404, { error: 'Звук не найден или у вас нет прав на его изменение.' });
+              return;
+            }
+            workerPool.events.emit('soundsChanged');
+            sendJson(res, 200, { ok: true, sound: updated });
+          } catch (err: any) {
+            sendJson(res, 400, { error: redactSensitiveText(err?.message || 'Не удалось обновить звук.') });
+          }
+          return;
+        }
+
+        const reactSoundMatch = pathname.match(/^\/api\/soundboard\/custom\/(\d+)\/react$/);
+        if (reactSoundMatch && method === 'POST') {
+          const id = Number(reactSoundMatch[1]);
+          const body = await readJsonBody<{ value?: number }>(req);
+          const rawVal = Number(body.value);
+          const value: ReactionVote = rawVal === 1 ? 1 : rawVal === -1 ? -1 : 0;
+
+          const record = await SoundboardService.getCustomSoundById(activeGuildId, id);
+          if (!record || !record.isPublic) {
+            sendJson(res, 404, { error: 'Публичный звук не найден.' });
+            return;
+          }
+
+          const summary = await ReactionService.setVote({
+            targetType: 'sound',
+            targetId: id,
+            userId: session.userId,
+            value,
+          });
+          workerPool.events.emit('soundsChanged');
+          sendJson(res, 200, { ok: true, ...summary });
+          return;
+        }
+
         const deleteSoundMatch = pathname.match(/^\/api\/soundboard\/custom\/(\d+)$/);
         if (deleteSoundMatch && method === 'DELETE') {
           const id = Number(deleteSoundMatch[1]);
-          const deleted = await SoundboardService.deleteCustomSound(activeGuildId, id);
+          const deleted = await SoundboardService.deleteCustomSound(
+            activeGuildId,
+            id,
+            session.userId
+          );
           if (!deleted) {
-            sendJson(res, 404, { error: 'Звук не найден.' });
+            sendJson(res, 404, { error: 'Звук не найден или у вас нет прав на его удаление.' });
             return;
           }
           workerPool.events.emit('soundsChanged');
@@ -1156,7 +1581,11 @@ export function startWebServer(discordClient: Client): http.Server {
         const soundFileMatch = pathname.match(/^\/api\/soundboard\/file\/(\d+)$/);
         if (soundFileMatch && method === 'GET') {
           const id = Number(soundFileMatch[1]);
-          const record = await SoundboardService.getCustomSoundById(activeGuildId, id);
+          const record = await SoundboardService.getAccessibleSoundById(
+            activeGuildId,
+            id,
+            session.userId
+          );
           if (!record) {
             sendJson(res, 404, { error: 'Звук не найден.' });
             return;
@@ -1195,10 +1624,23 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         const userChannelId = ctx.voice.channelId;
+        const userChannelName = ctx.voice.channelName;
 
         if (pathname === '/api/worker/summon' && method === 'POST') {
           try {
+            const wasInChannel = Boolean(workerPool.getWorkerForChannel(userChannelId));
             const worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+            if (!wasInChannel) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'summon',
+              });
+            }
             sendJson(res, 200, {
               ok: true,
               workerId: worker.id,
@@ -1216,7 +1658,21 @@ export function startWebServer(discordClient: Client): http.Server {
             sendJson(res, 404, { error: 'В вашем канале нет активного агента.' });
             return;
           }
+          const droppedTracks = [
+            ...(worker.queue.currentTrack ? [toAuditTrack(worker.queue.currentTrack)] : []),
+            ...worker.queue.tracks.map(toAuditTrack),
+          ];
           worker.queue.stop();
+          void AuditLogService.record({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            channelName: userChannelName,
+            workerId: worker.id,
+            actor: webActor,
+            source: 'web',
+            action: 'stop',
+            tracks: droppedTracks,
+          });
           workerPool.emitActivity({
             guildId: activeGuildId,
             channelId: userChannelId,
@@ -1241,9 +1697,21 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
 
+          const wasInChannel = Boolean(workerPool.getWorkerForChannel(userChannelId));
           let worker;
           try {
             worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+            if (!wasInChannel) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'summon',
+              });
+            }
           } catch (err: any) {
             sendJson(res, 409, { error: err.message });
             return;
@@ -1261,6 +1729,18 @@ export function startWebServer(discordClient: Client): http.Server {
             }
 
             const result = await worker.queue.add(tracks);
+            if (result.addedCount > 0) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'add_tracks',
+                tracks: tracks.slice(0, result.addedCount).map(toAuditTrack),
+              });
+            }
             sendJson(res, 200, {
               ok: true,
               addedCount: result.addedCount,
@@ -1283,9 +1763,21 @@ export function startWebServer(discordClient: Client): http.Server {
             name?: string;
           }>(req);
 
+          const wasInChannel = Boolean(workerPool.getWorkerForChannel(userChannelId));
           let worker;
           try {
             worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+            if (!wasInChannel) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'summon',
+              });
+            }
           } catch (err: any) {
             sendJson(res, 409, { error: err.message });
             return;
@@ -1293,7 +1785,11 @@ export function startWebServer(discordClient: Client): http.Server {
 
           if (body.type === 'custom' && body.id) {
             const soundId = Number(body.id);
-            const record = await SoundboardService.getCustomSoundById(activeGuildId, soundId);
+            const record = await SoundboardService.getAccessibleSoundById(
+              activeGuildId,
+              soundId,
+              session.userId
+            );
             if (!record) {
               sendJson(res, 404, { error: 'Звук не найден.' });
               return;
@@ -1360,6 +1856,64 @@ export function startWebServer(discordClient: Client): http.Server {
           return;
         }
 
+        if (pathname === '/api/favorites/play-all' && method === 'POST') {
+          const favs = await FavoriteService.list(session.userId);
+          if (favs.length === 0) {
+            sendJson(res, 400, { error: 'Список любимых треков пуст.' });
+            return;
+          }
+          const wasInChannel = Boolean(workerPool.getWorkerForChannel(userChannelId));
+          let worker;
+          try {
+            worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+            if (!wasInChannel) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'summon',
+              });
+            }
+          } catch (err: any) {
+            sendJson(res, 409, { error: err.message });
+            return;
+          }
+
+          const tracks = favs.map((f) =>
+            FavoriteService.toBasicTrack(f, { id: session.userId, tag: ctx.displayName })
+          );
+          try {
+            const result = await worker.queue.add(tracks);
+            if (result.addedCount > 0) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'add_tracks',
+                tracks: tracks.slice(0, result.addedCount).map(toAuditTrack),
+                mergeable: false,
+              });
+            }
+            sendJson(res, 200, {
+              ok: true,
+              addedCount: result.addedCount,
+              isPlayingNow: result.isPlayingNow,
+              firstTrack: tracks[0],
+            });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось добавить любимые треки.'),
+            });
+          }
+          return;
+        }
+
         if (pathname === '/api/playlists/load' && method === 'POST') {
           const body = await readJsonBody<{ id?: number }>(req);
           const id = Number(body.id);
@@ -1368,7 +1922,11 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
 
-          const playlist = await PlaylistService.getUserPlaylistById(session.userId, id);
+          const playlist = await PlaylistService.getAccessiblePlaylistById(
+            activeGuildId,
+            session.userId,
+            id
+          );
           if (!playlist) {
             sendJson(res, 404, { error: 'Плейлист не найден.' });
             return;
@@ -1378,9 +1936,21 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
 
+          const wasInChannel = Boolean(workerPool.getWorkerForChannel(userChannelId));
           let worker;
           try {
             worker = await workerPool.ensureWorkerInChannel(userChannelId, activeGuildId);
+            if (!wasInChannel) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'summon',
+              });
+            }
           } catch (err: any) {
             sendJson(res, 409, { error: err.message });
             return;
@@ -1392,6 +1962,20 @@ export function startWebServer(discordClient: Client): http.Server {
           });
           try {
             const result = await worker.queue.add(tracks);
+            if (result.addedCount > 0) {
+              void AuditLogService.record({
+                guildId: activeGuildId,
+                channelId: userChannelId,
+                channelName: userChannelName,
+                workerId: worker.id,
+                actor: webActor,
+                source: 'web',
+                action: 'add_tracks',
+                details: { playlistName: playlist.name },
+                tracks: tracks.slice(0, result.addedCount).map(toAuditTrack),
+                mergeable: false,
+              });
+            }
             sendJson(res, 200, {
               ok: true,
               playlistName: playlist.name,
@@ -1416,7 +2000,11 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/playlists/save' && method === 'POST') {
-          const body = await readJsonBody<{ name?: string }>(req);
+          const body = await readJsonBody<{
+            name?: string;
+            color?: string;
+            isPublic?: boolean;
+          }>(req);
           const name = String(body.name || '').trim();
           if (!name) {
             sendJson(res, 400, { error: 'Введите название плейлиста.' });
@@ -1429,11 +2017,19 @@ export function startWebServer(discordClient: Client): http.Server {
           try {
             const saved = await PlaylistService.savePlaylist({
               userId: session.userId,
+              guildId: activeGuildId,
+              authorName: ctx.displayName,
+              authorUsername: ctx.username,
               name,
+              color: body.color,
+              isPublic: body.isPublic,
               currentTrack: worker.queue.currentTrack,
               upcomingTracks: worker.queue.tracks,
             });
-            workerPool.events.emit('playlistsChanged', session.userId);
+            workerPool.events.emit(
+              'playlistsChanged',
+              saved.playlist.isPublic ? undefined : session.userId
+            );
             sendJson(res, 201, {
               ok: true,
               playlist: saved.playlist,
@@ -1446,7 +2042,18 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/player/pause' && method === 'POST') {
+          const current = worker.queue.currentTrack;
           if (worker.queue.pause()) {
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              channelName: userChannelName,
+              workerId: worker.id,
+              actor: webActor,
+              source: 'web',
+              action: 'pause',
+              tracks: current ? [toAuditTrack(current)] : [],
+            });
             workerPool.emitActivity({
               guildId: activeGuildId,
               channelId: userChannelId,
@@ -1460,7 +2067,18 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/player/resume' && method === 'POST') {
+          const current = worker.queue.currentTrack;
           if (worker.queue.resume()) {
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              channelName: userChannelName,
+              workerId: worker.id,
+              actor: webActor,
+              source: 'web',
+              action: 'resume',
+              tracks: current ? [toAuditTrack(current)] : [],
+            });
             workerPool.emitActivity({
               guildId: activeGuildId,
               channelId: userChannelId,
@@ -1476,8 +2094,24 @@ export function startWebServer(discordClient: Client): http.Server {
         if (pathname === '/api/player/skip' && method === 'POST') {
           const body = await readJsonBody<{ count?: number }>(req);
           const count = Math.max(1, Number(body.count) || 1);
+          const skippedTracks = worker.queue.currentTrack
+            ? [
+                toAuditTrack(worker.queue.currentTrack),
+                ...worker.queue.tracks.slice(0, Math.max(0, count - 1)).map(toAuditTrack),
+              ]
+            : [];
           const skipped = worker.queue.skip(count);
           if (skipped) {
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              channelName: userChannelName,
+              workerId: worker.id,
+              actor: webActor,
+              source: 'web',
+              action: 'skip',
+              tracks: skippedTracks,
+            });
             workerPool.emitActivity({
               guildId: activeGuildId,
               channelId: userChannelId,
@@ -1493,7 +2127,21 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/player/stop' && method === 'POST') {
+          const droppedTracks = [
+            ...(worker.queue.currentTrack ? [toAuditTrack(worker.queue.currentTrack)] : []),
+            ...worker.queue.tracks.map(toAuditTrack),
+          ];
           worker.queue.stop();
+          void AuditLogService.record({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            channelName: userChannelName,
+            workerId: worker.id,
+            actor: webActor,
+            source: 'web',
+            action: 'stop',
+            tracks: droppedTracks,
+          });
           workerPool.emitActivity({
             guildId: activeGuildId,
             channelId: userChannelId,
@@ -1508,6 +2156,16 @@ export function startWebServer(discordClient: Client): http.Server {
         if (pathname === '/api/player/shuffle' && method === 'POST') {
           const count = worker.queue.shuffle();
           if (count > 1) {
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              channelName: userChannelName,
+              workerId: worker.id,
+              actor: webActor,
+              source: 'web',
+              action: 'shuffle',
+              details: { count },
+            });
             workerPool.emitActivity({
               guildId: activeGuildId,
               channelId: userChannelId,
@@ -1539,6 +2197,16 @@ export function startWebServer(discordClient: Client): http.Server {
             return;
           }
           worker.queue.setLoop(body.mode);
+          void AuditLogService.record({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            channelName: userChannelName,
+            workerId: worker.id,
+            actor: webActor,
+            source: 'web',
+            action: 'loop',
+            details: { loopMode: body.mode },
+          });
           workerPool.emitActivity({
             guildId: activeGuildId,
             channelId: userChannelId,
@@ -1564,6 +2232,16 @@ export function startWebServer(discordClient: Client): http.Server {
               sendJson(res, 404, { error: 'Трек с таким индексом не найден.' });
               return;
             }
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              channelName: userChannelName,
+              workerId: worker.id,
+              actor: webActor,
+              source: 'web',
+              action: 'play_now',
+              tracks: [toAuditTrack(track)],
+            });
             workerPool.emitActivity({
               guildId: activeGuildId,
               channelId: userChannelId,
@@ -1588,6 +2266,16 @@ export function startWebServer(discordClient: Client): http.Server {
             sendJson(res, 404, { error: 'Трек с таким индексом не найден.' });
             return;
           }
+          void AuditLogService.record({
+            guildId: activeGuildId,
+            channelId: userChannelId,
+            channelName: userChannelName,
+            workerId: worker.id,
+            actor: webActor,
+            source: 'web',
+            action: 'remove_tracks',
+            tracks: [toAuditTrack(removed)],
+          });
           workerPool.emitActivity({
             guildId: activeGuildId,
             channelId: userChannelId,
@@ -1608,8 +2296,19 @@ export function startWebServer(discordClient: Client): http.Server {
         }
 
         if (pathname === '/api/queue/clear' && method === 'POST') {
+          const clearedTracks = worker.queue.tracks.map(toAuditTrack);
           const cleared = worker.queue.clearUpcoming();
           if (cleared > 0) {
+            void AuditLogService.record({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              channelName: userChannelName,
+              workerId: worker.id,
+              actor: webActor,
+              source: 'web',
+              action: 'clear_queue',
+              tracks: clearedTracks,
+            });
             workerPool.emitActivity({
               guildId: activeGuildId,
               channelId: userChannelId,

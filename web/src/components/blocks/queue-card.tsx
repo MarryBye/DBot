@@ -1,11 +1,11 @@
 import * as React from 'react';
 import type { TranslateFn } from '@/i18n';
-import type { TrackItem } from '@/types/api';
+import type { FavoriteTrackInput, TrackItem } from '@/types/api';
+import { buildTrackKey } from '@/utils/format';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Icon } from '@/components/ui/icon';
-import { Input } from '@/components/ui/input';
 import { Pagination } from '@/components/ui/pagination';
 import { SectionHeader } from '@/components/ui/section-header';
 import { QueueItemRow } from './queue-item-row';
@@ -17,12 +17,16 @@ export interface QueueCardProps {
   canControl: boolean;
   canSavePlaylist: boolean;
   isSavingPlaylist: boolean;
+  favoriteTrackKeys: ReadonlySet<string>;
+  playlistTrackKeys: ReadonlySet<string>;
   t: TranslateFn;
   onPlayTrackNow: (index: number) => void;
   onMoveTrack: (fromIndex: number, toIndex: number) => void;
   onRemoveTrack: (index: number) => void;
   onClearQueue: () => void;
-  onSavePlaylist: (name: string) => void;
+  onRequestSavePlaylist: () => void;
+  onToggleFavorite: (track: FavoriteTrackInput) => void;
+  onAddToPlaylist: (track: FavoriteTrackInput) => void;
   onOpenLink: (url: string) => void;
   onCopyLink: (url: string) => void;
 }
@@ -32,17 +36,19 @@ export function QueueCard({
   canControl,
   canSavePlaylist,
   isSavingPlaylist,
+  favoriteTrackKeys,
+  playlistTrackKeys,
   t,
   onPlayTrackNow,
   onMoveTrack,
   onRemoveTrack,
   onClearQueue,
-  onSavePlaylist,
+  onRequestSavePlaylist,
+  onToggleFavorite,
+  onAddToPlaylist,
   onOpenLink,
   onCopyLink,
 }: QueueCardProps) {
-  const [saveOpen, setSaveOpen] = React.useState(false);
-  const [playlistName, setPlaylistName] = React.useState('');
   const [dragFromIndex, setDragFromIndex] = React.useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = React.useState<number | null>(null);
   const [page, setPage] = React.useState(1);
@@ -58,15 +64,6 @@ export function QueueCard({
   const pageStart = (page - 1) * QUEUE_PAGE_SIZE;
   const visibleTracks = tracks.slice(pageStart, pageStart + QUEUE_PAGE_SIZE);
 
-  const handleSaveSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = playlistName.trim();
-    if (!trimmed) return;
-    onSavePlaylist(trimmed);
-    setPlaylistName('');
-    setSaveOpen(false);
-  };
-
   return (
     <Card className="flex flex-col">
       <CardHeader className="border-b border-border pb-3">
@@ -78,8 +75,8 @@ export function QueueCard({
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={!canSavePlaylist}
-                onClick={() => setSaveOpen((prev) => !prev)}
+                disabled={!canSavePlaylist || isSavingPlaylist}
+                onClick={onRequestSavePlaylist}
               >
                 <Icon name="save" size="xs" />
                 <span>{t('queue.save')}</span>
@@ -99,44 +96,6 @@ export function QueueCard({
       </CardHeader>
 
       <CardContent className="flex flex-1 flex-col gap-3 pt-4">
-        {saveOpen && canSavePlaylist && (
-          <form
-            onSubmit={handleSaveSubmit}
-            className="flex flex-col gap-2 rounded-[2px] border border-border bg-subtle p-2.5 sm:flex-row"
-          >
-            <Input
-              value={playlistName}
-              maxLength={60}
-              autoFocus
-              disabled={isSavingPlaylist}
-              placeholder={t('queue.savePlaceholder')}
-              onChange={(e) => setPlaylistName(e.target.value)}
-            />
-            <div className="flex gap-1.5">
-              <Button
-                type="submit"
-                variant="primary"
-                size="sm"
-                disabled={isSavingPlaylist || !playlistName.trim()}
-                className="flex-1 sm:flex-none"
-              >
-                {t('queue.saveConfirm')}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setSaveOpen(false);
-                  setPlaylistName('');
-                }}
-              >
-                {t('queue.cancel')}
-              </Button>
-            </div>
-          </form>
-        )}
-
         {tracks.length === 0 ? (
           <EmptyState
             icon="list-music"
@@ -156,6 +115,8 @@ export function QueueCard({
                     index={globalIdx}
                     totalCount={tracks.length}
                     canControl={canControl}
+                    isFavorite={favoriteTrackKeys.has(buildTrackKey(track))}
+                    isInPlaylist={playlistTrackKeys.has(buildTrackKey(track))}
                     isDragging={dragFromIndex === globalIdx}
                     isDragOver={dragOverIndex === globalIdx && dragFromIndex !== globalIdx}
                     t={t}
@@ -164,6 +125,8 @@ export function QueueCard({
                     onMoveUp={(i) => onMoveTrack(i, i - 1)}
                     onMoveDown={(i) => onMoveTrack(i, i + 1)}
                     onRemove={onRemoveTrack}
+                    onToggleFavorite={onToggleFavorite}
+                    onAddToPlaylist={onAddToPlaylist}
                     onOpenLink={onOpenLink}
                     onCopyLink={onCopyLink}
                     onDragStart={setDragFromIndex}
