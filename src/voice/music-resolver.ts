@@ -1,4 +1,4 @@
-import { Client as YtdlClient, Ytdl } from '@distube/ytdl-core';
+import { Client as YtdlClient, Ytdl, chooseFormat } from '@distube/ytdl-core';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { dataDir } from '../db/index.js';
 import {
   spawnPcmDecoder,
+  spawnPcmDecoderFromUrl,
   verifyPcmStream,
   type PcmDecoderHandle,
 } from './ffmpeg.js';
@@ -749,10 +750,8 @@ export class MusicResolver {
         const mediaUrl = await SoundCloudClient.fetchMediaStreamUrl(
           track.soundcloudTranscodingUrl
         );
-        const verified = await verifyPcmStream(
-          spawnPcmDecoder(mediaUrl, 'soundcloud'),
-          10_000
-        );
+        const decoder = await spawnPcmDecoderFromUrl(mediaUrl, 'soundcloud');
+        const verified = await verifyPcmStream(decoder, 10_000);
         return { handle: verified, actualSource: 'SoundCloud' };
       } catch (scErr: any) {
         console.warn(
@@ -791,22 +790,24 @@ export class MusicResolver {
         const hasWebmAudio = info.formats.some(
           (f) => f.hasAudio && !f.hasVideo && f.container === 'webm'
         );
+        const chosenFilter = hasWebmAudio
+          ? { hasAudio: true, hasVideo: false, container: 'webm' }
+          : { hasAudio: true, hasVideo: false };
+        const chosenFmt = chooseFormat(info.formats, { filter: chosenFilter });
 
         const rawStream = ytdl.download(info, {
-          filter: hasWebmAudio
-            ? { hasAudio: true, hasVideo: false, container: 'webm' }
-            : { hasAudio: true, hasVideo: false },
-          highWaterMark: 512 * 1024, // 512KB — мгновенный старт и низкое потребление RAM
-          chunkSize: 1024 * 1024,    // 1MB чанки вместо 10MB (быстрый первый кадр!)
+          filter: chosenFilter,
+          highWaterMark: 512 * 1024,
+          chunkSize: 1024 * 1024,
         });
 
         const verified = await verifyPcmStream(
-          spawnPcmDecoder(rawStream, 'youtube'),
+          spawnPcmDecoder(rawStream, `youtube:${chosenFmt.itag}`),
           10_000
         );
         return {
           handle: verified,
-          actualSource: `YouTube (${hasWebmAudio ? 'webm' : 'mp4'})`,
+          actualSource: `YouTube (${chosenFmt.container}, itag=${chosenFmt.itag}, client=${chosenFmt.client})`,
         };
       }
     } catch (ytErr: any) {
@@ -820,10 +821,8 @@ export class MusicResolver {
       track.searchQuery || cleanTrackQueryForFallback(track.title, track.author);
     const scMediaUrl = await SoundCloudClient.findDirectStreamForQuery(fallbackQuery);
     if (scMediaUrl) {
-      const verified = await verifyPcmStream(
-        spawnPcmDecoder(scMediaUrl, 'soundcloud-fallback'),
-        10_000
-      );
+      const decoder = await spawnPcmDecoderFromUrl(scMediaUrl, 'soundcloud-fallback');
+      const verified = await verifyPcmStream(decoder, 10_000);
       return { handle: verified, actualSource: 'SoundCloud (fallback)' };
     }
 

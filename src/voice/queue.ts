@@ -1,5 +1,9 @@
 import { AudioPlayerStatus } from '@discordjs/voice';
-import { spawnPcmDecoder, verifyPcmStream } from './ffmpeg.js';
+import {
+  spawnPcmDecoder,
+  spawnPcmDecoderFromUrl,
+  verifyPcmStream,
+} from './ffmpeg.js';
 import { AudioMixer } from './mixer.js';
 import { MusicResolver, type Track } from './music-resolver.js';
 import type { VoiceWorker } from './worker-pool.js';
@@ -32,6 +36,7 @@ export class AudioQueue {
     this.worker = worker;
 
     this.mixer = new AudioMixer({
+      workerId: worker.id,
       onMusicEnd: () => {
         this.handleTrackEnd();
       },
@@ -261,10 +266,10 @@ export class AudioQueue {
     }
 
     this.clearIdleTimer();
-    const verified = await verifyPcmStream(
-      spawnPcmDecoder(sourceInput, `sfx:${effect.name}`),
-      8_000
-    );
+    const rawDecoder = effect.filePath
+      ? spawnPcmDecoder(effect.filePath, `sfx:${effect.name}`)
+      : await spawnPcmDecoderFromUrl(effect.url!, `sfx:${effect.name}`);
+    const verified = await verifyPcmStream(rawDecoder, 8_000);
     console.log(`🔊 [Worker #${this.worker.id}] Мем поверх микса: ${effect.name}`);
     this.mixer.setVolume(this.volume);
     this.mixer.addSfx(effect.name, verified);

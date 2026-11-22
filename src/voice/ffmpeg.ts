@@ -1,12 +1,25 @@
 import ffmpegStatic from 'ffmpeg-static';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
-import { PassThrough, type Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
 let cachedFfmpegPath: string | null = null;
 
 export function getFfmpegPath(): string {
   if (cachedFfmpegPath) return cachedFfmpegPath;
+
+  // На Linux (Ubuntu / Oracle Cloud) всегда предпочитаем системный /usr/bin/ffmpeg —
+  // у него полноценный системный OpenSSL, CA-сертификаты, HLS и оптимизация под CPU!
+  if (process.platform !== 'win32') {
+    for (const sysPath of ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']) {
+      if (fs.existsSync(sysPath)) {
+        cachedFfmpegPath = sysPath;
+        console.log(`🎬 [FFmpeg] Используется системный бинарник: ${cachedFfmpegPath}`);
+        return cachedFfmpegPath;
+      }
+    }
+  }
 
   const staticPath: string | null =
     typeof ffmpegStatic === 'string'
@@ -15,21 +28,23 @@ export function getFfmpegPath(): string {
 
   if (staticPath && fs.existsSync(staticPath)) {
     cachedFfmpegPath = staticPath;
+    console.log(`🎬 [FFmpeg] Используется ffmpeg-static: ${cachedFfmpegPath}`);
     return cachedFfmpegPath;
   }
 
-  // Фолбэк на системный ffmpeg (например, /usr/bin/ffmpeg на Ubuntu/Oracle Cloud)
   cachedFfmpegPath = 'ffmpeg';
+  console.log(`🎬 [FFmpeg] Используется ffmpeg из PATH`);
   return cachedFfmpegPath;
 }
 
 export interface PcmDecoderHandle {
   stdout: Readable;
   cleanup: () => void;
+  getLastError?: () => string;
 }
 
 /**
- * Декодирует любой аудиофайл, URL (включая HLS .m3u8 и MP3) или Node Readable stream
+ * Декодирует локальный файл, URL (HLS .m3u8) или Node Readable stream
  * в сырой PCM 48kHz stereo signed 16-bit LE (формат Discord Voice).
  */
 export function spawnPcmDecoder(
@@ -63,7 +78,10 @@ export function spawnPcmDecoder(
     stdio: [isStream ? 'pipe' : 'ignore', 'pipe', 'pipe'],
   });
 
+  let stderrBuf = '';
+  let exitCode: number | null = null;
   let cleaned = false;
+
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
@@ -83,7 +101,9 @@ export function spawnPcmDecoder(
   if (isStream && proc.stdin) {
     input.pipe(proc.stdin);
     input.on('error', (err) => {
-      console.error(`❌ [Stream:${label}] Ошибка входного потока:`, err?.message || err);
+      const msg = err?.message || String(err);
+      stderrBuf += (stderrBuf ? ' | ' : '') + `InputStreamError: ${msg}`;
+      console.error(`❌ [Stream:${label}] Ошибка входного потока:`, msg);
       try {
         proc.stdin?.end();
       } catch {}
@@ -96,25 +116,66 @@ export function spawnPcmDecoder(
 
   proc.stderr?.on('data', (chunk: Buffer) => {
     const msg = chunk.toString('utf-8').trim();
-    if (msg && !msg.includes('Broken pipe') && !msg.includes('Error writing trailer')) {
-      console.warn(`⚠️ [FFmpeg:${label}] ${msg.slice(0, 240)}`);
+    if (msg) {
+      stderrBuf = (stderrBuf + ' ' + msg).trim().slice(-400);
+      if (!msg.includes('Broken pipe') && !msg.includes('Error writing trailer')) {
+        console.warn(`⚠️ [FFmpeg:${label}] ${msg.slice(0, 240)}`);
+      }
     }
   });
 
+  proc.on('close', (code) => {
+    exitCode = code;
+  });
+
   proc.on('error', (err) => {
+    stderrBuf += ` SpawnError: ${err.message}`;
     console.error(`❌ [FFmpeg:${label}] Не удалось запустить ffmpeg:`, err.message);
   });
 
   return {
     stdout: proc.stdout!,
     cleanup,
+    getLastError: () => {
+      const parts: string[] = [];
+      if (exitCode !== null && exitCode !== 0) parts.push(`exit=${exitCode}`);
+      if (stderrBuf) parts.push(stderrBuf);
+      return parts.join(' | ');
+    },
   };
 }
 
 /**
+ * Надёжное декодирование аудио по HTTP/HTTPS URL:
+ * - Для обычных аудиофайлов (.mp3, progressive) скачивает через встроенный Node fetch()
+ *   и подаёт в ffmpeg через pipe:0 (никаких проблем с TLS/SSL внутри FFmpeg!).
+ * - Для HLS (.m3u8) передаёт URL напрямую системному /usr/bin/ffmpeg.
+ */
+export async function spawnPcmDecoderFromUrl(
+  url: string,
+  label = 'url'
+): Promise<PcmDecoderHandle> {
+  const isHls = url.includes('.m3u8') || url.includes('/hls/');
+  if (isHls) {
+    return spawnPcmDecoder(url, label);
+  }
+
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  });
+
+  if (!res.ok || !res.body) {
+    throw new Error(`HTTP ${res.status} при загрузке аудио (${label})`);
+  }
+
+  const nodeStream = Readable.fromWeb(res.body as unknown as WebReadableStream);
+  return spawnPcmDecoder(nodeStream, label);
+}
+
+/**
  * Дожидается первых реальных PCM-байт от FFmpeg (до timeoutMs) без потери начала трека.
- * Если входной поток завис, вернул 403 или пуст — сразу отклоняет Promise и убивает процесс,
- * позволяя мгновенно переключиться на резервный источник (SoundCloud)!
+ * Если входной поток завис, вернул 403 или пуст — сразу отклоняет Promise с точной причиной
+ * из stderr FFmpeg и убивает процесс.
  */
 export async function verifyPcmStream(
   handle: PcmDecoderHandle,
@@ -134,8 +195,13 @@ export async function verifyPcmStream(
       if (settled) return;
       settled = true;
       cleanupListeners();
+      const details = handle.getLastError?.();
       handle.cleanup();
-      reject(new Error(`Таймаут ожидания аудиоданных (${Math.round(timeoutMs / 1000)}с)`));
+      reject(
+        new Error(
+          `Таймаут ожидания аудиоданных (${Math.round(timeoutMs / 1000)}с)${details ? ` [${details}]` : ''}`
+        )
+      );
     }, timeoutMs);
 
     const onData = (firstChunk: Buffer) => {
@@ -161,6 +227,7 @@ export async function verifyPcmStream(
           } catch {}
           handle.cleanup();
         },
+        getLastError: handle.getLastError,
       });
     };
 
@@ -169,8 +236,16 @@ export async function verifyPcmStream(
       settled = true;
       clearTimeout(timer);
       cleanupListeners();
-      handle.cleanup();
-      reject(new Error('Аудиопоток закрылся без передачи звуковых данных'));
+      // Даём 60мс чтобы stderr успел дописать причину выхода FFmpeg
+      setTimeout(() => {
+        const details = handle.getLastError?.();
+        handle.cleanup();
+        reject(
+          new Error(
+            `Аудиопоток закрылся без передачи звуковых данных${details ? ` (${details})` : ''}`
+          )
+        );
+      }, 60);
     };
 
     const onError = (err: Error) => {

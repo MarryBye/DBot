@@ -6,7 +6,7 @@ const FRAME_MS = 20;
 const FRAME_BYTES = 3840; // 48000 Hz * 0.02s * 2 ch * 2 bytes (s16le)
 const SAMPLES_PER_FRAME = FRAME_BYTES / 2; // 1920 Int16 samples
 const MAX_BUFFER_BYTES = FRAME_BYTES * 64; // ~240 KB (~1.28s предбуфер на источник)
-const MAX_OUTPUT_QUEUE_BYTES = FRAME_BYTES * 2; // Максимум 40мс в выходном буфере (нулевая задержка мемов!)
+const MAX_OUTPUT_QUEUE_BYTES = FRAME_BYTES * 2; // Максимум 40мс в выходном буфере
 
 const DUCK_TARGET_GAIN = 0.18; // Музыка приглушается до 18% во время мема
 const DUCK_DOWN_STEP = 0.14;   // Быстрое плавное приглушение (~120мс)
@@ -14,6 +14,7 @@ const DUCK_UP_STEP = 0.045;    // Плавный возврат громкост
 
 class BufferedPcmSource {
   public readonly name: string;
+  public totalBytesReceived = 0;
   private handle: PcmDecoderHandle;
   private chunks: Buffer[] = [];
   private bufferedBytes = 0;
@@ -29,6 +30,7 @@ class BufferedPcmSource {
       if (this.closed) return;
       this.chunks.push(chunk);
       this.bufferedBytes += chunk.length;
+      this.totalBytesReceived += chunk.length;
       if (this.bufferedBytes >= MAX_BUFFER_BYTES && !this.isPausedBackpressure) {
         this.isPausedBackpressure = true;
         handle.stdout.pause();
@@ -52,8 +54,8 @@ class BufferedPcmSource {
     return this.closed || (this.ended && this.bufferedBytes === 0);
   }
 
-  public get hasData(): boolean {
-    return this.bufferedBytes > 0;
+  public get bufferedKB(): number {
+    return Math.round(this.bufferedBytes / 1024);
   }
 
   public readFrame(): Buffer | null {
@@ -100,13 +102,14 @@ class BufferedPcmSource {
 }
 
 export interface AudioMixerCallbacks {
+  workerId: number;
   onMusicEnd: () => void;
   onSfxStateChange: (activeNames: string[]) => void;
 }
 
 /**
  * Реалтайм PCM-микшер (48kHz Stereo s16le):
- * - Жёсткий контроль backpressure (не более 40мс буфера на выходе -> никаких накоплений тишины!).
+ * - Жёсткий контроль backpressure (не более 40мс буфера на выходе -> нулевая задержка мемов!).
  * - Плавно приглушает музыку до 18% при запуске любого мема/звука и плавно возвращает громкость обратно.
  * - Поддерживает наложение до 4 звуков одновременно поверх музыки.
  */
@@ -122,6 +125,13 @@ export class AudioMixer {
   private nextTickNs = 0n;
   private callbacks: AudioMixerCallbacks;
 
+  // Диагностика первых 2.5с воспроизведения каждого трека
+  private diagFramesTotal = 0;
+  private diagMusicFrames = 0;
+  private diagNonZeroFrames = 0;
+  private diagPeak = 0;
+  private diagLogged = true;
+
   constructor(callbacks: AudioMixerCallbacks) {
     this.callbacks = callbacks;
   }
@@ -134,9 +144,6 @@ export class AudioMixer {
     return this.output !== null && !this.output.destroyed;
   }
 
-  /**
-   * Создаёт (или пересоздаёт при forceRecreate=true) Raw PCM AudioResource для AudioPlayer.
-   */
   public ensureResource(forceRecreate = false): { resource: AudioResource | null; created: boolean } {
     if (this.output && !this.output.destroyed && !forceRecreate) {
       return { resource: null, created: false };
@@ -160,6 +167,11 @@ export class AudioMixer {
     }
     this.musicPaused = false;
     this.musicSource = new BufferedPcmSource(name, handle);
+    this.diagFramesTotal = 0;
+    this.diagMusicFrames = 0;
+    this.diagNonZeroFrames = 0;
+    this.diagPeak = 0;
+    this.diagLogged = false;
   }
 
   public clearMusic(): void {
@@ -168,6 +180,7 @@ export class AudioMixer {
       this.musicSource = null;
     }
     this.musicPaused = false;
+    this.diagLogged = true;
   }
 
   public addSfx(name: string, handle: PcmDecoderHandle): void {
@@ -260,6 +273,12 @@ export class AudioMixer {
 
     // 2. Проверяем завершение текущего музыкального трека
     if (this.musicSource && !this.musicPaused && this.musicSource.isFinished) {
+      if (!this.diagLogged) {
+        this.diagLogged = true;
+        console.log(
+          `📊 [Mixer #${this.callbacks.workerId}] Трек завершился рано: frames=${this.diagMusicFrames}/${this.diagFramesTotal}, nonZero=${this.diagNonZeroFrames}, peak=${this.diagPeak}, totalKB=${Math.round(this.musicSource.totalBytesReceived / 1024)}`
+        );
+      }
       this.musicSource.destroy();
       this.musicSource = null;
       this.callbacks.onMusicEnd();
@@ -272,8 +291,7 @@ export class AudioMixer {
       return;
     }
 
-    // 4. Жёсткий backpressure (проверяем И readableLength, И writableLength!):
-    // PassThrough переносит байты в readableLength — так буфер никогда не превышает 40мс!
+    // 4. Жёсткий backpressure (проверяем И readableLength, И writableLength!)
     if (this.output.readableLength + this.output.writableLength >= MAX_OUTPUT_QUEUE_BYTES) {
       return;
     }
@@ -298,6 +316,7 @@ export class AudioMixer {
     }
 
     const outFrame = Buffer.alloc(FRAME_BYTES);
+    let framePeak = 0;
 
     if (musicFrame || sfxFrames.length > 0) {
       const masterGain = this.volume / 100;
@@ -318,7 +337,26 @@ export class AudioMixer {
         if (sample > 32767) sample = 32767;
         else if (sample < -32768) sample = -32768;
 
-        outFrame.writeInt16LE(sample | 0, byteOffset);
+        const intSample = sample | 0;
+        const absVal = intSample < 0 ? -intSample : intSample;
+        if (absVal > framePeak) framePeak = absVal;
+
+        outFrame.writeInt16LE(intSample, byteOffset);
+      }
+    }
+
+    // Однократный лог диагностики через 2.5с (125 кадров) после старта трека
+    if (!this.diagLogged && this.musicSource && !this.musicPaused) {
+      this.diagFramesTotal++;
+      if (musicFrame) this.diagMusicFrames++;
+      if (framePeak > 50) this.diagNonZeroFrames++;
+      if (framePeak > this.diagPeak) this.diagPeak = framePeak;
+
+      if (this.diagFramesTotal >= 125) {
+        this.diagLogged = true;
+        console.log(
+          `📊 [Mixer #${this.callbacks.workerId}] 2.5с: musicFrames=${this.diagMusicFrames}/125, nonZero=${this.diagNonZeroFrames}, peak=${this.diagPeak}, bufKB=${this.musicSource.bufferedKB}, totalKB=${Math.round(this.musicSource.totalBytesReceived / 1024)}`
+        );
       }
     }
 
