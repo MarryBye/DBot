@@ -5,10 +5,16 @@ import { Tooltip } from './tooltip';
 export interface TruncatedTextProps {
   text: string;
   as?: 'span' | 'div' | 'p' | 'h3';
-  lines?: 1 | 2;
+  lines?: 1 | 2 | 3;
   alwaysTooltip?: boolean;
   className?: string;
 }
+
+const LINE_CLAMP_CLASS: Record<1 | 2 | 3, string> = {
+  1: 'truncate',
+  2: 'line-clamp-2 [overflow-wrap:anywhere]',
+  3: 'line-clamp-3 [overflow-wrap:anywhere]',
+};
 
 export function TruncatedText({
   text,
@@ -80,8 +86,8 @@ export function TruncatedText({
         onFocus={scheduleOpen}
         onBlur={close}
         className={cn(
-          'block min-w-0 max-w-full',
-          lines === 2 ? 'line-clamp-2 break-words' : 'truncate',
+          'block min-w-0 max-w-full overflow-hidden',
+          LINE_CLAMP_CLASS[lines],
           className
         )}
       >

@@ -1,4 +1,5 @@
 import { cn } from '@/utils/cn';
+import { TruncatedText } from './truncated-text';
 
 export type IndicatorTone = 'online' | 'offline' | 'busy' | 'warning' | 'danger';
 
@@ -18,9 +19,14 @@ export interface StatusIndicatorProps {
 
 export function StatusIndicator({ tone, label, className }: StatusIndicatorProps) {
   return (
-    <span className={cn('inline-flex items-center gap-2 text-xs font-medium text-fg-primary', className)}>
+    <span
+      className={cn(
+        'inline-flex min-w-0 max-w-full items-center gap-2 overflow-hidden text-xs font-medium text-fg-primary',
+        className
+      )}
+    >
       <span className={cn('h-2 w-2 shrink-0 rounded-[1px]', TONE_DOT[tone])} />
-      <span className="truncate">{label}</span>
+      <TruncatedText text={label} className="min-w-0 flex-1" />
     </span>
   );
 }

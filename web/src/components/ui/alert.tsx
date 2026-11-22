@@ -4,7 +4,7 @@ import { cn } from '@/utils/cn';
 import { Icon, type IconName } from './icon';
 
 const alertVariants = cva(
-  'flex items-start gap-2.5 rounded-[2px] border border-l-[3px] px-3.5 py-2.5 text-sm',
+  'flex min-w-0 items-start gap-2.5 overflow-hidden rounded-[2px] border border-l-[3px] px-3.5 py-2.5 text-sm',
   {
     variants: {
       variant: {
@@ -37,8 +37,8 @@ export function Alert({ className, variant = 'info', icon, children, ...props }:
   const resolvedIcon = icon ?? DEFAULT_ICON[variant ?? 'info'];
   return (
     <div role="alert" className={cn(alertVariants({ variant }), className)} {...props}>
-      <Icon name={resolvedIcon} size="sm" className="mt-0.5" />
-      <div className="min-w-0 flex-1 leading-snug">{children}</div>
+      <Icon name={resolvedIcon} size="sm" className="mt-0.5 shrink-0" />
+      <div className="min-w-0 flex-1 leading-snug [overflow-wrap:anywhere]">{children}</div>
     </div>
   );
 }

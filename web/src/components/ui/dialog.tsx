@@ -30,7 +30,7 @@ export const DialogContent = React.forwardRef<
       ref={ref}
       className={cn(
         'fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2',
-        'rounded-[2px] border border-border-strong bg-surface p-5 text-fg-primary shadow-lg',
+        'overflow-hidden rounded-[2px] border border-border-strong bg-surface p-5 text-fg-primary shadow-lg',
         'focus:outline-none',
         className
       )}
@@ -49,7 +49,7 @@ export const DialogContent = React.forwardRef<
 DialogContent.displayName = 'DialogContent';
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-col gap-1.5 pr-6', className)} {...props} />;
+  return <div className={cn('flex min-w-0 flex-col gap-1.5 pr-6', className)} {...props} />;
 }
 
 export const DialogTitle = React.forwardRef<
@@ -58,7 +58,7 @@ export const DialogTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Title
     ref={ref}
-    className={cn('text-base font-semibold text-fg-primary', className)}
+    className={cn('min-w-0 text-base font-semibold text-fg-primary [overflow-wrap:anywhere]', className)}
     {...props}
   />
 ));
@@ -70,7 +70,7 @@ export const DialogDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Description
     ref={ref}
-    className={cn('text-sm leading-relaxed text-fg-secondary', className)}
+    className={cn('min-w-0 text-sm leading-relaxed text-fg-secondary [overflow-wrap:anywhere]', className)}
     {...props}
   />
 ));

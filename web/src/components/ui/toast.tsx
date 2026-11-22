@@ -1,6 +1,7 @@
 import type { ToastMessage, ToastVariant } from '@/types/api';
 import { cn } from '@/utils/cn';
 import { Icon, type IconName } from './icon';
+import { TruncatedText } from './truncated-text';
 
 const VARIANT_CLASSES: Record<ToastVariant, string> = {
   info: 'border-l-accent bg-surface text-fg-primary',
@@ -35,12 +36,16 @@ export function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
           <div
             key={toast.id}
             className={cn(
-              'flex items-start gap-2.5 rounded-[2px] border border-border-strong border-l-[3px] px-3.5 py-2.5 text-sm shadow-md',
+              'flex min-w-0 items-start gap-2.5 overflow-hidden rounded-[2px] border border-border-strong border-l-[3px] px-3.5 py-2.5 text-sm shadow-md',
               VARIANT_CLASSES[toast.variant]
             )}
           >
-            <Icon name={iconSpec.name} size="sm" className={cn('mt-0.5', iconSpec.color)} />
-            <span className="min-w-0 flex-1 leading-snug">{toast.message}</span>
+            <Icon name={iconSpec.name} size="sm" className={cn('mt-0.5 shrink-0', iconSpec.color)} />
+            <TruncatedText
+              text={toast.message}
+              lines={2}
+              className="min-w-0 flex-1 leading-snug"
+            />
             <button
               type="button"
               onClick={() => onDismiss(toast.id)}

@@ -53,9 +53,9 @@ export function Tooltip({ content, anchorRect, open, className }: TooltipProps) 
         opacity: pos.ready ? 1 : 0,
       }}
       className={cn(
-        'pointer-events-none fixed z-[60] max-w-xs break-words rounded-[2px]',
+        'pointer-events-none fixed z-[60] max-w-[min(22rem,calc(100vw-16px))] rounded-[2px]',
         'border border-border-strong bg-surface px-2.5 py-1.5',
-        'text-xs font-normal leading-snug text-fg-primary shadow-md',
+        'text-xs font-normal leading-snug text-fg-primary shadow-md [overflow-wrap:anywhere]',
         'transition-opacity duration-100',
         className
       )}
