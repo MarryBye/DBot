@@ -147,37 +147,81 @@ export async function deleteWebSession(token: string): Promise<void> {
   await db.delete(webSessions).where(eq(webSessions.token, token));
 }
 
-export async function getRequiredRoleId(guildId: string): Promise<string | null> {
+export interface GuildAccessSettings {
+  requiredRoleId: string | null;
+  allowedChannelId: string | null;
+}
+
+export async function getGuildSettings(guildId: string): Promise<GuildAccessSettings> {
   const [row] = await db
     .select()
     .from(dashboardSettings)
     .where(eq(dashboardSettings.guildId, guildId))
     .limit(1);
-  return row?.requiredRoleId ?? null;
+  return {
+    requiredRoleId: row?.requiredRoleId ?? null,
+    allowedChannelId: row?.allowedChannelId ?? null,
+  };
 }
 
-export async function setRequiredRoleId(
+export async function setGuildSettings(
   guildId: string,
-  requiredRoleId: string | null
-): Promise<void> {
+  patch: Partial<GuildAccessSettings>
+): Promise<GuildAccessSettings> {
   const existing = await db
     .select()
     .from(dashboardSettings)
     .where(eq(dashboardSettings.guildId, guildId))
     .limit(1);
 
+  const nextRequiredRoleId =
+    patch.requiredRoleId !== undefined
+      ? patch.requiredRoleId
+      : existing[0]?.requiredRoleId ?? null;
+  const nextAllowedChannelId =
+    patch.allowedChannelId !== undefined
+      ? patch.allowedChannelId
+      : existing[0]?.allowedChannelId ?? null;
+
   if (existing.length > 0) {
     await db
       .update(dashboardSettings)
-      .set({ requiredRoleId, updatedAt: new Date() })
+      .set({
+        requiredRoleId: nextRequiredRoleId,
+        allowedChannelId: nextAllowedChannelId,
+        updatedAt: new Date(),
+      })
       .where(eq(dashboardSettings.guildId, guildId));
   } else {
     await db.insert(dashboardSettings).values({
       guildId,
-      requiredRoleId,
+      requiredRoleId: nextRequiredRoleId,
+      allowedChannelId: nextAllowedChannelId,
       updatedAt: new Date(),
     });
   }
+
+  return {
+    requiredRoleId: nextRequiredRoleId,
+    allowedChannelId: nextAllowedChannelId,
+  };
+}
+
+export async function getRequiredRoleId(guildId: string): Promise<string | null> {
+  const settings = await getGuildSettings(guildId);
+  return settings.requiredRoleId;
+}
+
+export async function getAllowedChannelId(guildId: string): Promise<string | null> {
+  const settings = await getGuildSettings(guildId);
+  return settings.allowedChannelId;
+}
+
+export async function setRequiredRoleId(
+  guildId: string,
+  requiredRoleId: string | null
+): Promise<void> {
+  await setGuildSettings(guildId, { requiredRoleId });
 }
 
 export async function getUserSharedGuilds(

@@ -9,6 +9,7 @@ import { MusicResolver, type Track } from './music-resolver.js';
 import type { VoiceWorker } from './worker-pool.js';
 
 export const IDLE_PLAYBACK_TIMEOUT_MS = 5 * 60 * 1000; // 5 минут без воспроизведения музыки
+export const MAX_QUEUE_SIZE = 500; // Защита от переполнения памяти очередью
 
 export interface SoundEffectPlayback {
   name: string;
@@ -173,16 +174,23 @@ export class AudioQueue {
   public async add(
     trackOrTracks: Track | Track[]
   ): Promise<{ position: number; isPlayingNow: boolean; addedCount: number }> {
-    const toAdd = Array.isArray(trackOrTracks) ? trackOrTracks : [trackOrTracks];
-    if (toAdd.length === 0) return { position: 0, isPlayingNow: false, addedCount: 0 };
+    const rawToAdd = Array.isArray(trackOrTracks) ? trackOrTracks : [trackOrTracks];
+    if (rawToAdd.length === 0) return { position: 0, isPlayingNow: false, addedCount: 0 };
 
+    const remainingCapacity = Math.max(0, MAX_QUEUE_SIZE - this.tracks.length);
     if (!this.currentTrack && this.tracks.length === 0) {
-      const [first, ...rest] = toAdd;
-      this.tracks.push(...rest);
+      const [first, ...rest] = rawToAdd;
+      const acceptedRest = rest.slice(0, MAX_QUEUE_SIZE);
+      this.tracks.push(...acceptedRest);
       await this.play(first);
-      return { position: 1, isPlayingNow: true, addedCount: toAdd.length };
+      return { position: 1, isPlayingNow: true, addedCount: 1 + acceptedRest.length };
     }
 
+    if (remainingCapacity === 0) {
+      throw new Error(`Очередь переполнена (максимум ${MAX_QUEUE_SIZE} треков).`);
+    }
+
+    const toAdd = rawToAdd.slice(0, remainingCapacity);
     this.tracks.push(...toAdd);
     this.worker.notifyStateChange();
     return {

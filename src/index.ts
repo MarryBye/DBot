@@ -1,7 +1,8 @@
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { Client, Events, GatewayIntentBits, MessageFlags, PermissionFlagsBits, type GuildMember } from 'discord.js';
 import { config } from './config.js';
 import { commandMap } from './commands/index.js';
 import { workerPool } from './voice/index.js';
+import { getAllowedChannelId } from './web/auth.js';
 import { startWebServer } from './web/server.js';
 import './db/index.js'; // Инициализация SQLite базы
 
@@ -43,13 +44,42 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   ]);
 });
 
+async function checkAllowedBotChannel(
+  guildId: string,
+  channelId: string,
+  parentChannelId: string | null,
+  member: GuildMember | null
+): Promise<{ allowed: boolean; allowedChannelId: string | null }> {
+  const allowedChannelId = await getAllowedChannelId(guildId);
+  if (!allowedChannelId) {
+    return { allowed: true, allowedChannelId: null };
+  }
+
+  // Администраторы сервера всегда могут вызывать команды из любого канала
+  if (member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return { allowed: true, allowedChannelId };
+  }
+
+  // Если настроенный канал был удалён с сервера — не блокируем бота
+  const guild = client.guilds.cache.get(guildId);
+  if (guild && !guild.channels.cache.has(allowedChannelId)) {
+    return { allowed: true, allowedChannelId: null };
+  }
+
+  if (channelId === allowedChannelId || parentChannelId === allowedChannelId) {
+    return { allowed: true, allowedChannelId };
+  }
+
+  return { allowed: false, allowedChannelId };
+}
+
 // 1. Обработка Slash-команд (/) и Autocomplete на всех серверах
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.guildId) {
     if (interaction.isChatInputCommand() && interaction.isRepliable()) {
       await interaction.reply({
         content: '⚠️ Команды бота работают на серверах Discord (не в личных сообщениях).',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
     return;
@@ -75,6 +105,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  const parentId =
+    interaction.channel && 'parentId' in interaction.channel
+      ? interaction.channel.parentId
+      : null;
+  const channelCheck = await checkAllowedBotChannel(
+    interaction.guildId,
+    interaction.channelId,
+    parentId,
+    (interaction.member as GuildMember | null) ?? null
+  );
+  if (!channelCheck.allowed && channelCheck.allowedChannelId) {
+    await interaction.reply({
+      content: `Команды бота разрешены только в канале <#${channelCheck.allowedChannelId}>.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   try {
     await command.execute(interaction);
   } catch (error) {
@@ -82,9 +130,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const errorMessage = 'Произошла непредвиденная ошибка при выполнении команды.';
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: errorMessage, ephemeral: true });
+      await interaction.followUp({ content: errorMessage, flags: MessageFlags.Ephemeral });
     } else {
-      await interaction.reply({ content: errorMessage, ephemeral: true });
+      await interaction.reply({ content: errorMessage, flags: MessageFlags.Ephemeral });
     }
   }
 });
@@ -101,6 +149,20 @@ client.on(Events.MessageCreate, async (message) => {
 
   const command = commandMap.get(commandName);
   if (!command) return;
+
+  const parentId = 'parentId' in message.channel ? message.channel.parentId : null;
+  const channelCheck = await checkAllowedBotChannel(
+    message.guildId,
+    message.channelId,
+    parentId,
+    message.member
+  );
+  if (!channelCheck.allowed && channelCheck.allowedChannelId) {
+    await message.reply(
+      `Команды бота разрешены только в канале <#${channelCheck.allowedChannelId}>.`
+    );
+    return;
+  }
 
   try {
     await command.executePrefix(message, rawArgs);

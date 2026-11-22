@@ -41,6 +41,7 @@ export const webSessions = sqliteTable('web_sessions', {
 export const dashboardSettings = sqliteTable('dashboard_settings', {
   guildId: text('guild_id').primaryKey(),
   requiredRoleId: text('required_role_id'),
+  allowedChannelId: text('allowed_channel_id'),
   updatedAt: integer('updated_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

@@ -8,7 +8,11 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "start:prod": "node dist/index.js",
-    "build": "tsc",
+    "build": "tsc && pnpm web:build",
+    "web:dev": "vite --config web/vite.config.ts --mode standalone",
+    "web:dev:live": "vite --config web/vite.config.ts",
+    "web:build": "vite build --config web/vite.config.ts",
+    "web:typecheck": "tsc -p web/tsconfig.json --noEmit",
     "deploy-commands": "tsx src/deploy-commands.ts",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate"
@@ -26,20 +30,38 @@
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
     "@distube/ytdl-core": "^5.2.1",
+    "@radix-ui/react-dialog": "^1.3.1",
+    "@radix-ui/react-select": "^2.4.1",
+    "@radix-ui/react-slider": "^1.6.1",
+    "@radix-ui/react-slot": "^1.5.0",
+    "@radix-ui/react-switch": "^1.4.1",
+    "@radix-ui/react-tabs": "^1.2.1",
     "better-sqlite3": "13.2.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "discord.js": "^14.17.3",
     "dotenv": "^16.4.7",
     "drizzle-orm": "0.45.4",
     "ffmpeg-static": "^5.3.0",
     "libsodium-wrappers": "^0.8.4",
-    "opusscript": "^0.1.1"
+    "lucide-react": "^1.77.0",
+    "opusscript": "^0.1.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.1"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
     "@types/better-sqlite3": "9.6.0",
     "@types/libsodium-wrappers": "^0.8.2",
     "@types/node": "^22.13.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
     "drizzle-kit": "0.31.11",
+    "tailwindcss": "^4.3.5",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vite": "^8.3.8"
   }
 }

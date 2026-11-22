@@ -1,4 +1,4 @@
-import { Client } from 'discord.js';
+import { ChannelType, Client } from 'discord.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
@@ -6,7 +6,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { soundsDir } from '../db/index.js';
 import { workerPool } from '../voice/index.js';
-import { MusicResolver, type PlatformOption } from '../voice/music-resolver.js';
+import { MusicResolver, type PlatformOption, type Track } from '../voice/music-resolver.js';
 import { PlaylistService } from '../voice/playlists.js';
 import {
   getSafeAudioMimeType,
@@ -18,10 +18,10 @@ import {
   consumeMagicToken,
   createWebSession,
   deleteWebSession,
-  getRequiredRoleId,
+  getGuildSettings,
   getWebSession,
   resolveMemberContext,
-  setRequiredRoleId,
+  setGuildSettings,
   updateSessionActiveGuild,
   verifyLiveGuildAdmin,
 } from './auth.js';
@@ -39,14 +39,143 @@ const publicDir = path.resolve(process.cwd(), 'public');
 const oauthStates = new Map<string, number>();
 const rateLimiter = new RateLimiter();
 
-// Строгий белый список статических файлов — делает Path Traversal структурно невозможным!
+interface WatchPresenceEntry {
+  sessionToken: string;
+  userId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  guildId: string;
+  channelId: string;
+  updatedAt: number;
+}
+
+const WATCH_PRESENCE_TTL_MS = 30 * 60 * 1000;
+const watchSessions = new Map<string, WatchPresenceEntry>();
+
+function serializePublicTrack(track: Track) {
+  return {
+    id: track.id,
+    title: track.title,
+    author: track.author,
+    url: track.url,
+    originalUrl: track.originalUrl,
+    durationSec: track.durationSec,
+    durationFormatted: track.durationFormatted,
+    thumbnail: track.thumbnail,
+    source: track.source,
+    mediaKind: track.mediaKind ?? (track.source === 'youtube' ? 'video' : 'music'),
+    requestedBy: track.requestedBy,
+  };
+}
+
+function getChannelListeners(
+  client: Client,
+  guildId: string | null,
+  channelId: string | null
+): Array<{ id: string; displayName: string; avatarUrl: string | null }> {
+  if (!guildId || !channelId) return [];
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return [];
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel || !channel.isVoiceBased()) return [];
+
+  const members = [...channel.members.values()]
+    .filter((m) => !m.user.bot)
+    .slice(0, 50);
+
+  return members.map((m) => ({
+    id: m.id,
+    displayName: m.displayName,
+    avatarUrl: m.displayAvatarURL({ size: 64 }),
+  }));
+}
+
+function getWatchViewersForChannel(
+  client: Client,
+  guildId: string | null,
+  channelId: string | null
+): Array<{ id: string; displayName: string; avatarUrl: string | null }> {
+  if (!guildId || !channelId) return [];
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return [];
+
+  const now = Date.now();
+  const seenUsers = new Set<string>();
+  const viewers: Array<{ id: string; displayName: string; avatarUrl: string | null }> = [];
+
+  for (const [token, entry] of watchSessions.entries()) {
+    if (now - entry.updatedAt > WATCH_PRESENCE_TTL_MS) {
+      watchSessions.delete(token);
+      continue;
+    }
+    if (entry.guildId !== guildId || entry.channelId !== channelId) continue;
+
+    // Проверяем, что пользователь всё ещё физически находится в этом голосовом канале
+    const voiceState = guild.voiceStates.cache.get(entry.userId);
+    if (!voiceState || voiceState.channelId !== channelId) {
+      watchSessions.delete(token);
+      continue;
+    }
+
+    if (seenUsers.has(entry.userId)) continue;
+    seenUsers.add(entry.userId);
+    viewers.push({
+      id: entry.userId,
+      displayName: entry.displayName,
+      avatarUrl: entry.avatarUrl,
+    });
+  }
+
+  return viewers;
+}
+
+// Белый список корневых статических файлов и безопасных расширений для собранных Vite-ассетов
 const STATIC_FILES = new Map<string, { file: string; contentType: string }>([
   ['/', { file: 'index.html', contentType: 'text/html; charset=utf-8' }],
   ['/index.html', { file: 'index.html', contentType: 'text/html; charset=utf-8' }],
-  ['/styles.css', { file: 'styles.css', contentType: 'text/css; charset=utf-8' }],
-  ['/app.js', { file: 'app.js', contentType: 'application/javascript; charset=utf-8' }],
   ['/favicon.ico', { file: 'favicon.ico', contentType: 'image/x-icon' }],
+  ['/favicon.svg', { file: 'favicon.svg', contentType: 'image/svg+xml' }],
 ]);
+
+const ASSET_CONTENT_TYPES = new Map<string, string>([
+  ['.js', 'application/javascript; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.svg', 'image/svg+xml'],
+  ['.png', 'image/png'],
+  ['.ico', 'image/x-icon'],
+  ['.woff2', 'font/woff2'],
+  ['.woff', 'font/woff'],
+]);
+
+function resolveStaticAsset(
+  pathname: string
+): { filePath: string; contentType: string; cacheControl: string } | null {
+  const staticEntry = STATIC_FILES.get(pathname);
+  if (staticEntry) {
+    const filePath = path.join(publicDir, staticEntry.file);
+    return {
+      filePath,
+      contentType: staticEntry.contentType,
+      cacheControl: 'no-cache',
+    };
+  }
+
+  // Собранные Vite-бандлы в /assets/<safe-name> (строгая валидация имени файла исключает Path Traversal)
+  if (/^\/assets\/[a-zA-Z0-9._-]+$/.test(pathname) && !pathname.includes('..')) {
+    const ext = path.extname(pathname).toLowerCase();
+    const contentType = ASSET_CONTENT_TYPES.get(ext);
+    if (!contentType) return null;
+    const relativeName = pathname.slice('/assets/'.length);
+    const filePath = path.join(publicDir, 'assets', relativeName);
+    return {
+      filePath,
+      contentType,
+      cacheControl: 'public, max-age=31536000, immutable',
+    };
+  }
+
+  return null;
+}
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie;
@@ -143,10 +272,43 @@ async function buildUserStatePayload(
       ? workerPool.getWorkerForChannel(ctx.voice.channelId) ?? null
       : null;
 
-  const poolStatuses = workerPool.getAllStatuses().map((w) => ({
-    ...w,
-    isMine: myWorker !== null && w.id === myWorker.id,
-  }));
+  const userGuildIds = new Set(ctx.sharedGuilds.map((g) => g.id));
+  const poolStatuses = workerPool.getAllStatuses().map((w) => {
+    const canSeeDetails = Boolean(w.isInChannel && w.guildId && userGuildIds.has(w.guildId));
+    const workerInst = canSeeDetails ? workerPool.getWorkerById(w.id) ?? null : null;
+    const listeners = canSeeDetails
+      ? getChannelListeners(client, w.guildId, w.channelId)
+      : [];
+    const currentTrack =
+      canSeeDetails && workerInst?.queue.currentTrack
+        ? serializePublicTrack(workerInst.queue.currentTrack)
+        : null;
+    const queue =
+      canSeeDetails && workerInst
+        ? workerInst.queue.tracks.map(serializePublicTrack)
+        : [];
+
+    return {
+      ...w,
+      guildId: canSeeDetails ? w.guildId : null,
+      guildName: canSeeDetails ? w.guildName : null,
+      channelId: canSeeDetails ? w.channelId : null,
+      channelName: canSeeDetails ? w.channelName : null,
+      currentTrackTitle: canSeeDetails ? w.currentTrackTitle : null,
+      queueLength: canSeeDetails ? w.queueLength : 0,
+      isMine: myWorker !== null && w.id === myWorker.id,
+      canInspect: canSeeDetails,
+      listeners,
+      currentTrack,
+      queue,
+      progressSec: canSeeDetails && workerInst ? workerInst.queue.getPlaybackProgressSec() : 0,
+    };
+  });
+
+  const watchViewers =
+    ctx.voice.inVoice && ctx.guildId && ctx.voice.channelId
+      ? getWatchViewersForChannel(client, ctx.guildId, ctx.voice.channelId)
+      : [];
 
   const availableForGuild = ctx.guildId
     ? workerPool.getAvailableCountForGuild(ctx.guildId)
@@ -183,10 +345,13 @@ async function buildUserStatePayload(
           activeSfxName: myWorker.queue.activeSfxName,
           idleLeaveAt: myWorker.queue.idleLeaveAt,
           emptyLeaveAt: myWorker.emptyLeaveAt,
-          currentTrack: myWorker.queue.currentTrack,
-          queue: myWorker.queue.tracks,
+          currentTrack: myWorker.queue.currentTrack
+            ? serializePublicTrack(myWorker.queue.currentTrack)
+            : null,
+          queue: myWorker.queue.tracks.map(serializePublicTrack),
         }
       : null,
+    watchViewers,
     pool: {
       totalCount: workerPool.totalCount,
       availableCount: availableForGuild,
@@ -423,6 +588,9 @@ export function startWebServer(discordClient: Client): http.Server {
       if (pathname === '/api/auth/logout' && method === 'POST') {
         const cookies = parseCookies(req);
         if (cookies[COOKIE_NAME]) {
+          if (watchSessions.delete(cookies[COOKIE_NAME])) {
+            workerPool.events.emit('stateChanged');
+          }
           await deleteWebSession(cookies[COOKIE_NAME]).catch(() => {});
         }
         clearSessionCookie(res);
@@ -481,6 +649,12 @@ export function startWebServer(discordClient: Client): http.Server {
 
           req.on('close', () => {
             sseClients.delete(clientEntry);
+            const stillHasSse = [...sseClients].some(
+              (c) => c.sessionToken === session.token
+            );
+            if (!stillHasSse && watchSessions.delete(session.token)) {
+              workerPool.events.emit('stateChanged');
+            }
           });
           return;
         }
@@ -517,7 +691,7 @@ export function startWebServer(discordClient: Client): http.Server {
 
         const activeGuildId = ctx.guildId;
 
-        // ---- Настройки администратора (выбор роли доступа для активного сервера) ----
+        // ---- Настройки администратора (роль доступа и разрешённый текстовый канал для активного сервера) ----
         // На всех /api/admin/* выполняем ЖИВУЮ проверку прав Администратора в Discord API (force: true)!
         if (pathname === '/api/admin/settings' && method === 'GET') {
           const liveAdmin = await verifyLiveGuildAdmin(discordClient, activeGuildId, session.userId);
@@ -532,8 +706,27 @@ export function startWebServer(discordClient: Client): http.Server {
                 .sort((a, b) => b.position - a.position)
                 .map((r) => ({ id: r.id, name: r.name, color: r.hexColor }))
             : [];
-          const requiredRoleId = await getRequiredRoleId(activeGuildId);
-          sendJson(res, 200, { requiredRoleId, roles });
+          const channels = guild
+            ? [...guild.channels.cache.values()]
+                .filter(
+                  (c) =>
+                    c.type === ChannelType.GuildText ||
+                    c.type === ChannelType.GuildAnnouncement
+                )
+                .sort((a, b) => a.rawPosition - b.rawPosition)
+                .map((c) => ({
+                  id: c.id,
+                  name: c.name,
+                  parentName: c.parent?.name ?? null,
+                }))
+            : [];
+          const guildSettings = await getGuildSettings(activeGuildId);
+          sendJson(res, 200, {
+            requiredRoleId: guildSettings.requiredRoleId,
+            allowedChannelId: guildSettings.allowedChannelId,
+            roles,
+            channels,
+          });
           return;
         }
 
@@ -543,15 +736,57 @@ export function startWebServer(discordClient: Client): http.Server {
             sendJson(res, 403, { error: 'Только администраторы сервера могут изменять настройки.' });
             return;
           }
-          const body = await readJsonBody<{ requiredRoleId?: string | null }>(req);
-          const roleId = body.requiredRoleId ? String(body.requiredRoleId).trim() : null;
-          if (roleId && !/^\d{15,22}$/.test(roleId)) {
-            sendJson(res, 400, { error: 'Некорректный ID роли Discord.' });
-            return;
+          const body = await readJsonBody<{
+            requiredRoleId?: string | null;
+            allowedChannelId?: string | null;
+          }>(req);
+
+          const guild = discordClient.guilds.cache.get(activeGuildId);
+          const patch: { requiredRoleId?: string | null; allowedChannelId?: string | null } = {};
+
+          if ('requiredRoleId' in body) {
+            const roleId = body.requiredRoleId ? String(body.requiredRoleId).trim() : null;
+            if (roleId) {
+              if (!/^\d{15,22}$/.test(roleId)) {
+                sendJson(res, 400, { error: 'Некорректный ID роли Discord.' });
+                return;
+              }
+              const roleObj = guild?.roles.cache.get(roleId);
+              if (!roleObj || roleObj.id === guild?.id || roleObj.managed) {
+                sendJson(res, 400, { error: 'Указанная роль не найдена на этом сервере.' });
+                return;
+              }
+            }
+            patch.requiredRoleId = roleId;
           }
-          await setRequiredRoleId(activeGuildId, roleId || null);
+
+          if ('allowedChannelId' in body) {
+            const channelId = body.allowedChannelId ? String(body.allowedChannelId).trim() : null;
+            if (channelId) {
+              if (!/^\d{15,22}$/.test(channelId)) {
+                sendJson(res, 400, { error: 'Некорректный ID канала Discord.' });
+                return;
+              }
+              const channelObj = guild?.channels.cache.get(channelId);
+              if (
+                !channelObj ||
+                (channelObj.type !== ChannelType.GuildText &&
+                  channelObj.type !== ChannelType.GuildAnnouncement)
+              ) {
+                sendJson(res, 400, { error: 'Указанный текстовый канал не найден на этом сервере.' });
+                return;
+              }
+            }
+            patch.allowedChannelId = channelId;
+          }
+
+          const updated = await setGuildSettings(activeGuildId, patch);
           workerPool.events.emit('stateChanged');
-          sendJson(res, 200, { ok: true, requiredRoleId: roleId || null });
+          sendJson(res, 200, {
+            ok: true,
+            requiredRoleId: updated.requiredRoleId,
+            allowedChannelId: updated.allowedChannelId,
+          });
           return;
         }
 
@@ -635,6 +870,113 @@ export function startWebServer(discordClient: Client): http.Server {
           const actor = `${ctx.displayName} (${session.userId})`;
           const status = MusicResolver.clearCookies(actor);
           sendJson(res, 200, { ok: true, status });
+          return;
+        }
+
+        // ---- Присутствие на вкладке «Просмотр вместе» (только для своего голосового канала) ----
+        if (pathname === '/api/watch/presence' && method === 'POST') {
+          if (!rateLimiter.check(`watch:${session.userId}`, 60, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частые запросы статуса просмотра.' });
+            return;
+          }
+          const body = await readJsonBody<{ active?: boolean }>(req);
+          const active = Boolean(body.active);
+
+          if (!active || !ctx.voice.inVoice || !ctx.voice.channelId) {
+            const removed = watchSessions.delete(session.token);
+            if (removed) {
+              workerPool.events.emit('stateChanged');
+            }
+            sendJson(res, 200, { ok: true, active: false });
+            return;
+          }
+
+          const prev = watchSessions.get(session.token);
+          const nextEntry: WatchPresenceEntry = {
+            sessionToken: session.token,
+            userId: session.userId,
+            displayName: ctx.displayName,
+            avatarUrl: ctx.avatarUrl,
+            guildId: activeGuildId,
+            channelId: ctx.voice.channelId,
+            updatedAt: Date.now(),
+          };
+          watchSessions.set(session.token, nextEntry);
+
+          if (
+            !prev ||
+            prev.channelId !== nextEntry.channelId ||
+            prev.guildId !== nextEntry.guildId
+          ) {
+            workerPool.events.emit('stateChanged');
+          }
+          sendJson(res, 200, { ok: true, active: true });
+          return;
+        }
+
+        // ---- Постепенный поиск треков и плейлистов (NDJSON-стрим) ----
+        if (pathname === '/api/player/search' && method === 'GET') {
+          if (!rateLimiter.check(`search:${session.userId}`, 30, 60_000)) {
+            sendJson(res, 429, { error: 'Слишком частые запросы поиска. Подождите немного.' });
+            return;
+          }
+          const rawQuery = (url.searchParams.get('q') || '').trim();
+          if (!rawQuery || rawQuery.length > 200 || /[\0\r\n]/.test(rawQuery)) {
+            sendJson(res, 400, { error: 'Некорректный поисковый запрос.' });
+            return;
+          }
+          const rawPlatform = (url.searchParams.get('platform') || 'auto').toLowerCase();
+          const platform: PlatformOption = ['auto', 'youtube', 'soundcloud', 'spotify'].includes(
+            rawPlatform
+          )
+            ? (rawPlatform as PlatformOption)
+            : 'auto';
+          const page = Math.max(1, Math.min(5, Number(url.searchParams.get('page')) || 1));
+
+          res.writeHead(200, {
+            'Content-Type': 'application/x-ndjson; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'X-Accel-Buffering': 'no',
+          });
+
+          const abortController = new AbortController();
+          req.on('close', () => {
+            abortController.abort();
+          });
+
+          try {
+            await MusicResolver.searchStream(
+              rawQuery,
+              platform,
+              page,
+              {
+                onItem: (item) => {
+                  if (!res.writableEnded && !abortController.signal.aborted) {
+                    res.write(`${JSON.stringify({ type: 'item', item })}\n`);
+                  }
+                },
+                onComplete: (hasNextPage) => {
+                  if (!res.writableEnded && !abortController.signal.aborted) {
+                    res.write(`${JSON.stringify({ type: 'done', hasNextPage })}\n`);
+                  }
+                },
+              },
+              abortController.signal
+            );
+          } catch (err: any) {
+            if (!res.writableEnded && !abortController.signal.aborted) {
+              res.write(
+                `${JSON.stringify({
+                  type: 'error',
+                  error: redactSensitiveText(err?.message || 'Ошибка поиска.'),
+                })}\n`
+              );
+            }
+          } finally {
+            if (!res.writableEnded) {
+              res.end();
+            }
+          }
           return;
         }
 
@@ -971,12 +1313,13 @@ export function startWebServer(discordClient: Client): http.Server {
             tag: ctx.displayName,
           });
           try {
-            const result = await worker.queue.replaceQueue(tracks);
+            const result = await worker.queue.add(tracks);
             sendJson(res, 200, {
               ok: true,
               playlistName: playlist.name,
-              loadedCount: result.loadedCount,
-              firstTrack: result.firstTrack,
+              loadedCount: result.addedCount,
+              isPlayingNow: result.isPlayingNow,
+              firstTrack: tracks[0],
             });
           } catch (err: any) {
             sendJson(res, 400, {
@@ -1115,29 +1458,31 @@ export function startWebServer(discordClient: Client): http.Server {
         return;
       }
 
-      const staticEntry = STATIC_FILES.get(pathname);
-      if (!staticEntry) {
+      const resolvedStatic = resolveStaticAsset(pathname);
+      if (!resolvedStatic || !fs.existsSync(resolvedStatic.filePath)) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Not Found');
         return;
       }
 
-      const resolvedFile = path.join(publicDir, staticEntry.file);
-      if (!fs.existsSync(resolvedFile)) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Not Found');
+      const lstat = fs.lstatSync(resolvedStatic.filePath);
+      const realFile = fs.realpathSync(resolvedStatic.filePath);
+      const realPublicRoot = fs.realpathSync(publicDir);
+      if (lstat.isSymbolicLink() || !lstat.isFile() || !realFile.startsWith(realPublicRoot + path.sep)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Forbidden');
         return;
       }
 
       res.writeHead(200, {
-        'Content-Type': staticEntry.contentType,
-        'Cache-Control': 'no-cache',
+        'Content-Type': resolvedStatic.contentType,
+        'Cache-Control': resolvedStatic.cacheControl,
       });
       if (method === 'HEAD') {
         res.end();
         return;
       }
-      fs.createReadStream(resolvedFile).pipe(res);
+      fs.createReadStream(realFile).pipe(res);
     } catch (err: any) {
       console.error('❌ [WebServer] Ошибка обработки запроса:', err);
       if (!res.headersSent) {

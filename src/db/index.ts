@@ -66,6 +66,7 @@ sqlite.exec(`
   CREATE TABLE IF NOT EXISTS dashboard_settings (
     guild_id TEXT PRIMARY KEY,
     required_role_id TEXT,
+    allowed_channel_id TEXT,
     updated_at INTEGER NOT NULL
   );
 
@@ -84,6 +85,12 @@ sqlite.exec(`
 const sessionCols = sqlite.prepare('PRAGMA table_info(web_sessions)').all() as Array<{ name: string }>;
 if (!sessionCols.some((c) => c.name === 'active_guild_id')) {
   sqlite.exec('ALTER TABLE web_sessions ADD COLUMN active_guild_id TEXT;');
+}
+
+// Мягкая миграция: добавляем allowed_channel_id в dashboard_settings
+const settingsCols = sqlite.prepare('PRAGMA table_info(dashboard_settings)').all() as Array<{ name: string }>;
+if (!settingsCols.some((c) => c.name === 'allowed_channel_id')) {
+  sqlite.exec('ALTER TABLE dashboard_settings ADD COLUMN allowed_channel_id TEXT;');
 }
 
 export const db = drizzle(sqlite, { schema });

@@ -28,6 +28,7 @@ export function applySecurityHeaders(
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' https: data:",
       "media-src 'self' https://www.myinstants.com https://myinstants.com https://*.myinstants.com",
+      "frame-src https://www.youtube-nocookie.com https://www.youtube.com",
       "connect-src 'self'",
       "font-src 'self'",
       "object-src 'none'",

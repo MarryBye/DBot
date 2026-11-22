@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   DBot Metro Design System — Semantic Design Tokens (Light default + Dark)
+   Flat surfaces, crisp 1px borders, zero gradients, zero glow/glassmorphism.
+   ========================================================================== */
+
+:root {
+  --bg-canvas: #f3f4f6;
+  --bg-surface: #ffffff;
+  --bg-subtle: #ebeef2;
+  --bg-hover: #e4e8ee;
+
+  --fg-primary: #14171a;
+  --fg-secondary: #4a5562;
+  --fg-muted: #697586;
+  --fg-on-accent: #ffffff;
+
+  --border-default: #d5dce4;
+  --border-strong: #b8c2ce;
+
+  --accent: #0067b8;
+  --accent-hover: #005499;
+  --accent-subtle: #e6f1fa;
+  --accent-fg: #005499;
+
+  --success: #107c10;
+  --success-hover: #0d660d;
+  --success-subtle: #e7f4e7;
+  --success-fg: #0d660d;
+
+  --warning: #b86e00;
+  --warning-subtle: #fdf3e1;
+  --warning-fg: #8c5200;
+
+  --danger: #c42b1c;
+  --danger-hover: #a52215;
+  --danger-subtle: #fcebea;
+  --danger-fg: #a52215;
+
+  --platform-youtube: #cc0000;
+  --platform-soundcloud: #d94e00;
+  --platform-spotify: #14833b;
+
+  --focus-ring: #0067b8;
+}
+
+.dark {
+  --bg-canvas: #111317;
+  --bg-surface: #1a1d24;
+  --bg-subtle: #232832;
+  --bg-hover: #2b313e;
+
+  --fg-primary: #f1f4f8;
+  --fg-secondary: #b4becb;
+  --fg-muted: #8490a1;
+  --fg-on-accent: #ffffff;
+
+  --border-default: #2d3440;
+  --border-strong: #404a5a;
+
+  --accent: #2b88d8;
+  --accent-hover: #479be3;
+  --accent-subtle: #16293d;
+  --accent-fg: #75b8f0;
+
+  --success: #2ea043;
+  --success-hover: #3bb552;
+  --success-subtle: #142b1b;
+  --success-fg: #66d17a;
+
+  --warning: #d99018;
+  --warning-subtle: #2d2312;
+  --warning-fg: #f0b857;
+
+  --danger: #d94136;
+  --danger-hover: #e8554a;
+  --danger-subtle: #311717;
+  --danger-fg: #f38881;
+
+  --platform-youtube: #f05252;
+  --platform-soundcloud: #f27b35;
+  --platform-spotify: #39c16c;
+
+  --focus-ring: #479be3;
+}
+
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-surface: var(--bg-surface);
+  --color-subtle: var(--bg-subtle);
+  --color-hover: var(--bg-hover);
+
+  --color-fg-primary: var(--fg-primary);
+  --color-fg-secondary: var(--fg-secondary);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-on-accent: var(--fg-on-accent);
+
+  --color-border: var(--border-default);
+  --color-border-strong: var(--border-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-accent-fg: var(--accent-fg);
+
+  --color-success: var(--success);
+  --color-success-hover: var(--success-hover);
+  --color-success-subtle: var(--success-subtle);
+  --color-success-fg: var(--success-fg);
+
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-warning-fg: var(--warning-fg);
+
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-danger-fg: var(--danger-fg);
+
+  --color-platform-youtube: var(--platform-youtube);
+  --color-platform-soundcloud: var(--platform-soundcloud);
+  --color-platform-spotify: var(--platform-spotify);
+
+  --color-focus: var(--focus-ring);
+
+  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "Inter", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    border-color: var(--border-default);
+  }
+
+  html {
+    background-color: var(--bg-canvas);
+    color: var(--fg-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--bg-canvas);
+    color: var(--fg-primary);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+}

@@ -1,4 +1,4 @@
-import { Client as YtdlClient, Ytdl, chooseFormat } from '@distube/ytdl-core';
+import { Client as YtdlClient, SearchType, Ytdl, chooseFormat } from '@distube/ytdl-core';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,6 +16,29 @@ import {
 } from '../web/security.js';
 
 export type PlatformOption = 'auto' | 'youtube' | 'soundcloud' | 'spotify';
+export type SearchResultKind = 'music' | 'video' | 'stream' | 'track' | 'playlist';
+
+export interface SearchResultItem {
+  id: string;
+  title: string;
+  author: string;
+  url: string;
+  durationSec: number;
+  durationFormatted: string;
+  thumbnail: string | null;
+  source: 'youtube' | 'soundcloud' | 'spotify';
+  kind: SearchResultKind;
+  isLive?: boolean;
+  trackCount?: number;
+}
+
+const MAX_PLAYLIST_IMPORT = 150;
+const SEARCH_PAGE_SIZE = 6;
+const SEARCH_MAX_PAGES = 5;
+const SEARCH_CACHE_TTL_MS = 3 * 60 * 1000;
+const SEARCH_CACHE_MAX_ENTRIES = 80;
+
+export type TrackMediaKind = 'video' | 'music' | 'stream';
 
 export interface Track {
   uid: string;
@@ -29,6 +52,7 @@ export interface Track {
   durationFormatted: string;
   thumbnail: string | null;
   source: 'youtube' | 'spotify' | 'soundcloud';
+  mediaKind?: TrackMediaKind;
   streamKind: 'youtube' | 'soundcloud-direct';
   soundcloudTranscodingUrl?: string;
   soundcloudProtocol?: 'progressive' | 'hls';
@@ -203,17 +227,19 @@ class SoundCloudClient {
     throw new Error('Не удалось получить client_id SoundCloud');
   }
 
-  private static async apiGet(endpoint: string): Promise<any> {
+  private static async apiGet(endpoint: string, signal?: AbortSignal): Promise<any> {
     let clientId = await this.getClientId();
     const sep = endpoint.includes('?') ? '&' : '?';
     let res = await fetch(`${endpoint}${sep}client_id=${clientId}`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal,
     });
 
     if (res.status === 401 || res.status === 403) {
       clientId = await this.getClientId(true);
       res = await fetch(`${endpoint}${sep}client_id=${clientId}`, {
         headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal,
       });
     }
 
@@ -223,11 +249,53 @@ class SoundCloudClient {
     return res.json();
   }
 
-  public static async searchTracks(query: string, limit = 8): Promise<any[]> {
+  public static async searchTracks(
+    query: string,
+    limit = 8,
+    offset = 0,
+    signal?: AbortSignal
+  ): Promise<any[]> {
     const data = await this.apiGet(
-      `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(query)}&limit=${limit}`
+      `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`,
+      signal
     );
     return Array.isArray(data?.collection) ? data.collection : [];
+  }
+
+  public static async searchPlaylists(
+    query: string,
+    limit = 4,
+    offset = 0,
+    signal?: AbortSignal
+  ): Promise<any[]> {
+    const data = await this.apiGet(
+      `https://api-v2.soundcloud.com/search/playlists?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`,
+      signal
+    );
+    return Array.isArray(data?.collection) ? data.collection : [];
+  }
+
+  public static async fetchTracksByIds(ids: number[]): Promise<Map<number, any>> {
+    const result = new Map<number, any>();
+    const safeIds = ids.filter((id) => Number.isInteger(id) && id > 0);
+    for (let i = 0; i < safeIds.length; i += 50) {
+      const batch = safeIds.slice(i, i + 50);
+      try {
+        const items = await this.apiGet(
+          `https://api-v2.soundcloud.com/tracks?ids=${batch.join(',')}`
+        );
+        if (Array.isArray(items)) {
+          for (const item of items) {
+            if (item && typeof item.id === 'number') {
+              result.set(item.id, item);
+            }
+          }
+        }
+      } catch {
+        // Если часть треков недоступна — не прерываем весь плейлист
+      }
+    }
+    return result;
   }
 
   public static async resolveUrl(url: string): Promise<any> {
@@ -295,6 +363,7 @@ class SoundCloudClient {
       durationFormatted: formatDuration(durationSec),
       thumbnail: artwork,
       source: 'soundcloud',
+      mediaKind: 'music',
       streamKind: chosen ? 'soundcloud-direct' : 'youtube',
       soundcloudTranscodingUrl: chosen?.url,
       soundcloudProtocol: chosen?.protocol,
@@ -423,6 +492,99 @@ class SpotifyClient {
     return null;
   }
 
+  public static async searchCatalog(
+    query: string,
+    limit = 6,
+    offset = 0,
+    signal?: AbortSignal
+  ): Promise<SearchResultItem[]> {
+    const results: SearchResultItem[] = [];
+    const token = await this.getAppToken();
+
+    if (token) {
+      try {
+        const trackLimit = Math.min(10, Math.max(1, limit));
+        const plLimit = offset === 0 ? 2 : 1;
+        const res = await fetch(
+          `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track,playlist&limit=${trackLimit}&offset=${offset}`,
+          { headers: { Authorization: `Bearer ${token}` }, signal }
+        );
+        if (res.ok) {
+          const json = (await res.json()) as any;
+          const trackItems: any[] = json?.tracks?.items ?? [];
+          for (const item of trackItems) {
+            if (!item?.id || !item?.name) continue;
+            const artists = (item.artists ?? []).map((a: any) => a.name).join(', ') || 'Spotify';
+            const durationSec = Math.round((item.duration_ms ?? 0) / 1000);
+            results.push({
+              id: String(item.id),
+              title: item.name,
+              author: artists,
+              url: item.external_urls?.spotify ?? '',
+              durationSec,
+              durationFormatted: formatDuration(durationSec),
+              thumbnail: item.album?.images?.[1]?.url ?? item.album?.images?.[0]?.url ?? null,
+              source: 'spotify',
+              kind: 'track',
+            });
+          }
+
+          const playlistItems: any[] = (json?.playlists?.items ?? []).slice(0, plLimit);
+          for (const pl of playlistItems) {
+            if (!pl?.id || !pl?.name) continue;
+            results.push({
+              id: `pl-${pl.id}`,
+              title: pl.name,
+              author: pl.owner?.display_name || 'Spotify',
+              url: pl.external_urls?.spotify ?? `https://open.spotify.com/playlist/${pl.id}`,
+              durationSec: 0,
+              durationFormatted: '',
+              thumbnail: pl.images?.[0]?.url ?? null,
+              source: 'spotify',
+              kind: 'playlist',
+              trackCount: typeof pl.tracks?.total === 'number' ? pl.tracks.total : undefined,
+            });
+          }
+          if (results.length > 0) return results;
+        }
+      } catch {
+        // Fallback below
+      }
+    }
+
+    // Публичный фолбэк поиска треков (без URL чужого домена — при добавлении резолвится по названию и исполнителю)
+    try {
+      const dzRes = await fetch(
+        `https://api.deezer.com/search/track?q=${encodeURIComponent(query)}&limit=${limit}&index=${offset}`,
+        { signal }
+      );
+      if (dzRes.ok) {
+        const dz = (await dzRes.json()) as any;
+        const items: any[] = Array.isArray(dz?.data) ? dz.data : [];
+        for (const item of items) {
+          const artist = item.artist?.name ?? 'Artist';
+          const title = item.title ?? query;
+          const durationSec = Number(item.duration ?? 0);
+          results.push({
+            id: `dz-${item.id}`,
+            title,
+            author: artist,
+            url: '',
+            durationSec,
+            durationFormatted: formatDuration(durationSec),
+            thumbnail: item.album?.cover_medium ?? item.album?.cover_big ?? null,
+            source: 'spotify',
+            kind: 'track',
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return results;
+  }
+
   public static async resolveUrl(
     url: string,
     requestedBy: { id: string; tag: string }
@@ -431,6 +593,78 @@ class SpotifyClient {
 
     if (match) {
       const [, entityType, entityId] = match;
+
+      // 1) При наличии ключей Spotify API — грузим полные плейлисты/альбомы с пагинацией до MAX_PLAYLIST_IMPORT
+      const token = await this.getAppToken();
+      if (token && (entityType === 'playlist' || entityType === 'album')) {
+        try {
+          const collected: Track[] = [];
+          let nextUrl: string | null =
+            entityType === 'playlist'
+              ? `https://api.spotify.com/v1/playlists/${entityId}/tracks?limit=100`
+              : `https://api.spotify.com/v1/albums/${entityId}/tracks?limit=50`;
+
+          let albumCover: string | null = null;
+          if (entityType === 'album') {
+            const albRes = await fetch(`https://api.spotify.com/v1/albums/${entityId}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (albRes.ok) {
+              const albJson = (await albRes.json()) as any;
+              albumCover = albJson?.images?.[0]?.url ?? null;
+            }
+          }
+
+          while (nextUrl && collected.length < MAX_PLAYLIST_IMPORT) {
+            const apiRes = await fetch(nextUrl, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!apiRes.ok) break;
+            const pageData = (await apiRes.json()) as any;
+            const items: any[] = Array.isArray(pageData?.items) ? pageData.items : [];
+            for (const entry of items) {
+              if (collected.length >= MAX_PLAYLIST_IMPORT) break;
+              const t = entityType === 'playlist' ? entry?.track : entry;
+              if (!t?.name) continue;
+              const artists = (t.artists ?? []).map((a: any) => a.name).join(', ') || 'Spotify';
+              const durationSec = Math.round((t.duration_ms ?? 0) / 1000);
+              const trackId = String(t.id || makeUid());
+              collected.push({
+                uid: makeUid(),
+                id: trackId,
+                title: t.name,
+                author: artists,
+                url: '',
+                originalUrl: t.external_urls?.spotify ?? url,
+                searchQuery: `${artists} - ${t.name}`,
+                durationSec,
+                durationFormatted: formatDuration(durationSec),
+                thumbnail: t.album?.images?.[0]?.url ?? albumCover,
+                source: 'spotify',
+                streamKind: 'youtube',
+                requestedBy,
+              });
+            }
+            nextUrl = null;
+            if (typeof pageData?.next === 'string') {
+              try {
+                const parsedNext = new URL(pageData.next);
+                if (parsedNext.protocol === 'https:' && parsedNext.hostname === 'api.spotify.com') {
+                  nextUrl = parsedNext.toString();
+                }
+              } catch {
+                nextUrl = null;
+              }
+            }
+          }
+
+          if (collected.length > 0) return collected;
+        } catch (err) {
+          console.warn('⚠️ Spotify Web API playlist fallback to embed:', err);
+        }
+      }
+
+      // 2) Публичный Spotify embed (работает без API-ключей, отдаёт до 100 треков плейлиста/альбома)
       try {
         const embedRes = await fetch(
           `https://open.spotify.com/embed/${entityType}/${entityId}`,
@@ -477,7 +711,7 @@ class SpotifyClient {
               Array.isArray(entity?.trackList) &&
               entity.trackList.length > 0
             ) {
-              return entity.trackList.slice(0, 50).map((item: any) => {
+              return entity.trackList.slice(0, MAX_PLAYLIST_IMPORT).map((item: any) => {
                 const title = item.title || 'Unknown Track';
                 const artist = (item.subtitle || 'Spotify').replace(/\u00a0/g, ' ');
                 const durationSec = Math.round((item.duration ?? 0) / 1000);
@@ -694,10 +928,19 @@ export class MusicResolver {
       throw new Error('Пустой запрос.');
     }
 
-    const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+    const normalizedCandidate =
+      !/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) &&
+      !/\s/.test(trimmed) &&
+      /^(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com|open\.spotify\.com|soundcloud\.com|on\.soundcloud\.com)\//i.test(
+        trimmed
+      )
+        ? `https://${trimmed}`
+        : trimmed;
+
+    const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedCandidate);
 
     if (isUrl) {
-      const supported = this.parseSupportedUrl(trimmed);
+      const supported = this.parseSupportedUrl(normalizedCandidate);
       if (!supported) {
         throw new Error('Неподдерживаемая ссылка. Разрешены только YouTube, Spotify и SoundCloud.');
       }
@@ -757,10 +1000,26 @@ export class MusicResolver {
         return [SoundCloudClient.mapRawTrack(resolved, requestedBy)];
       }
       if (resolved?.kind === 'playlist' && Array.isArray(resolved.tracks)) {
+        const sliced = resolved.tracks.slice(0, MAX_PLAYLIST_IMPORT);
+        // SoundCloud API v2 возвращает только ID без метаданных для части треков плейлиста — дозагружаем их!
+        const missingIds = sliced
+          .filter((t: any) => t && !t.title && typeof t.id === 'number')
+          .map((t: any) => t.id as number);
+        const hydratedMap =
+          missingIds.length > 0
+            ? await SoundCloudClient.fetchTracksByIds(missingIds)
+            : new Map<number, any>();
+
         const mapped: Track[] = [];
-        for (const t of resolved.tracks.slice(0, 50)) {
-          if (t && t.title) {
-            mapped.push(SoundCloudClient.mapRawTrack(t, requestedBy));
+        for (const rawItem of sliced) {
+          const fullTrack =
+            rawItem && rawItem.title
+              ? rawItem
+              : typeof rawItem?.id === 'number'
+                ? hydratedMap.get(rawItem.id)
+                : null;
+          if (fullTrack && fullTrack.title) {
+            mapped.push(SoundCloudClient.mapRawTrack(fullTrack, requestedBy));
           }
         }
         if (mapped.length > 0) return mapped;
@@ -803,27 +1062,46 @@ export class MusicResolver {
     url: string,
     requestedBy: { id: string; tag: string }
   ): Promise<Track[]> {
-    if (
-      url.includes('/playlist?list=') ||
-      (url.includes('list=') && !url.includes('watch?v=') && !url.includes('youtu.be/'))
-    ) {
+    let parsedUrl: URL | null = null;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      parsedUrl = null;
+    }
+
+    const listId = parsedUrl?.searchParams.get('list')?.trim() || '';
+    const isPlaylistPath = parsedUrl?.pathname === '/playlist';
+    // Поддерживаем как /playlist?list=..., так и watch?v=...&list=PL... (кроме авто-радио RD без /playlist)
+    const shouldLoadPlaylist =
+      Boolean(listId) && (isPlaylistPath || !listId.startsWith('RD'));
+
+    if (shouldLoadPlaylist) {
       try {
-        const playlist = await ytdl.getPlaylist(url);
+        const playlist = await ytdl.getPlaylist(url, { limit: MAX_PLAYLIST_IMPORT });
         const items = playlist?.videos ?? [];
         if (items.length > 0) {
-          return items.slice(0, 50).map((item: any) => {
+          const isYtMusicUrl = parsedUrl?.hostname.toLowerCase() === 'music.youtube.com';
+          return items.slice(0, MAX_PLAYLIST_IMPORT).map((item: any) => {
             const durationSec = Number(item.lengthSeconds ?? 0);
+            const authorName = item.author?.name ?? 'YouTube';
+            const isMusicTrack = isYtMusicUrl || authorName.endsWith(' - Topic');
+            const mediaKind: TrackMediaKind = item.isLive
+              ? 'stream'
+              : isMusicTrack
+                ? 'music'
+                : 'video';
             return {
               uid: makeUid(),
               id: item.id,
               title: item.title || 'YouTube Video',
-              author: item.author?.name ?? 'YouTube',
+              author: authorName.replace(/ - Topic$/, ''),
               url: item.url,
               originalUrl: item.url,
               durationSec,
               durationFormatted: formatDuration(durationSec),
               thumbnail: item.thumbnails?.[0]?.url ?? null,
               source: 'youtube',
+              mediaKind,
               streamKind: 'youtube',
               requestedBy,
             };
@@ -834,23 +1112,34 @@ export class MusicResolver {
       }
     }
 
+    const isYtMusicHost = parsedUrl?.hostname.toLowerCase() === 'music.youtube.com';
+
     try {
       const info = await ytdl.getInfo(url);
       const details = info.videoDetails;
       const durationSec = Number(details.lengthSeconds ?? 0);
+      const authorName = details.author?.name ?? 'YouTube';
+      const isLive = Boolean((details as any).isLiveContent || (details as any).isLive);
+      const isMusicTrack = isYtMusicHost || authorName.endsWith(' - Topic');
+      const mediaKind: TrackMediaKind = isLive
+        ? 'stream'
+        : isMusicTrack
+          ? 'music'
+          : 'video';
 
       return [
         {
           uid: makeUid(),
           id: details.id,
           title: details.title,
-          author: details.author?.name ?? 'YouTube',
+          author: authorName.replace(/ - Topic$/, ''),
           url: details.url || url,
           originalUrl: url,
           durationSec,
           durationFormatted: formatDuration(durationSec),
           thumbnail: details.thumbnails?.[0]?.url ?? null,
           source: 'youtube',
+          mediaKind,
           streamKind: 'youtube',
           requestedBy,
         },
@@ -868,12 +1157,14 @@ export class MusicResolver {
         author_name?: string;
         thumbnail_url?: string;
       };
+      const authorName = oe.author_name ?? 'YouTube';
+      const isMusicTrack = isYtMusicHost || authorName.endsWith(' - Topic');
       return [
         {
           uid: makeUid(),
           id: makeUid(),
           title: oe.title,
-          author: oe.author_name ?? 'YouTube',
+          author: authorName.replace(/ - Topic$/, ''),
           url,
           originalUrl: url,
           searchQuery: cleanTrackQueryForFallback(oe.title, oe.author_name),
@@ -881,6 +1172,7 @@ export class MusicResolver {
           durationFormatted: '0:00',
           thumbnail: oe.thumbnail_url ?? null,
           source: 'youtube',
+          mediaKind: isMusicTrack ? 'music' : 'video',
           streamKind: 'youtube',
           requestedBy,
         },
@@ -899,23 +1191,334 @@ export class MusicResolver {
 
     const first = searchRes[0];
     const durationSec = Number(first.lengthSeconds ?? 0);
+    const authorName = first.author?.name ?? 'YouTube';
+    const mediaKind: TrackMediaKind = first.isLive
+      ? 'stream'
+      : authorName.endsWith(' - Topic')
+        ? 'music'
+        : 'video';
 
     return [
       {
         uid: makeUid(),
         id: first.id,
         title: first.title || query,
-        author: first.author?.name ?? 'YouTube',
+        author: authorName.replace(/ - Topic$/, ''),
         url: first.url,
         originalUrl: first.url,
         durationSec,
         durationFormatted: formatDuration(durationSec),
         thumbnail: first.thumbnails?.[0]?.url ?? null,
         source: 'youtube',
+        mediaKind,
         streamKind: 'youtube',
         requestedBy,
       },
     ];
+  }
+
+  private static searchCache = new Map<
+    string,
+    {
+      items: SearchResultItem[];
+      seenKeys: Set<string>;
+      fetchedPages: number;
+      exhausted: boolean;
+      updatedAt: number;
+    }
+  >();
+
+  private static pruneSearchCache(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.searchCache.entries()) {
+      if (now - entry.updatedAt > SEARCH_CACHE_TTL_MS) {
+        this.searchCache.delete(key);
+      }
+    }
+    while (this.searchCache.size > SEARCH_CACHE_MAX_ENTRIES) {
+      const oldest = this.searchCache.keys().next().value;
+      if (!oldest) break;
+      this.searchCache.delete(oldest);
+    }
+  }
+
+  private static mapYouTubeVideoToSearchItem(
+    video: any,
+    preferredKind: 'music' | 'video'
+  ): SearchResultItem | null {
+    if (!video?.id || !video?.url) return null;
+    const isLive = Boolean(video.isLive);
+    const authorName = video.author?.name || 'YouTube';
+    const badges: string[] = Array.isArray(video.author?.badges) ? video.author.badges : [];
+    const looksLikeMusic =
+      preferredKind === 'music' ||
+      authorName.endsWith(' - Topic') ||
+      badges.some((b) => String(b).toLowerCase().includes('artist'));
+
+    const kind: SearchResultKind = isLive ? 'stream' : looksLikeMusic ? 'music' : 'video';
+    const durationSec = isLive ? 0 : Number(video.lengthSeconds ?? 0);
+
+    return {
+      id: `yt-${video.id}`,
+      title: video.title || 'YouTube',
+      author: authorName.replace(/ - Topic$/, ''),
+      url: video.url,
+      durationSec,
+      durationFormatted: isLive ? '' : formatDuration(durationSec),
+      thumbnail: video.thumbnails?.[0]?.url ?? null,
+      source: 'youtube',
+      kind,
+      isLive,
+    };
+  }
+
+  private static mapYouTubePlaylistToSearchItem(pl: any): SearchResultItem | null {
+    if (!pl?.id || !pl?.url) return null;
+    return {
+      id: `ytpl-${pl.id}`,
+      title: pl.title || 'YouTube Playlist',
+      author: pl.author?.name || 'YouTube',
+      url: pl.url,
+      durationSec: 0,
+      durationFormatted: '',
+      thumbnail: pl.thumbnails?.[0]?.url ?? null,
+      source: 'youtube',
+      kind: 'playlist',
+      trackCount: typeof pl.videoCount === 'number' ? pl.videoCount : undefined,
+    };
+  }
+
+  private static mapSoundCloudTrackToSearchItem(raw: any): SearchResultItem | null {
+    if (!raw?.id || !raw?.title) return null;
+    const durationSec = Math.round((raw.duration ?? 0) / 1000);
+    const artwork = raw.artwork_url
+      ? String(raw.artwork_url).replace('-large.', '-t200x200.')
+      : raw.user?.avatar_url ?? null;
+    return {
+      id: `sc-${raw.id}`,
+      title: raw.title,
+      author: raw.user?.username || 'SoundCloud',
+      url: raw.permalink_url || '',
+      durationSec,
+      durationFormatted: formatDuration(durationSec),
+      thumbnail: artwork,
+      source: 'soundcloud',
+      kind: 'track',
+    };
+  }
+
+  private static mapSoundCloudPlaylistToSearchItem(raw: any): SearchResultItem | null {
+    if (!raw?.id || !raw?.title || !raw?.permalink_url) return null;
+    const artwork = raw.artwork_url
+      ? String(raw.artwork_url).replace('-large.', '-t200x200.')
+      : raw.user?.avatar_url ?? null;
+    return {
+      id: `scpl-${raw.id}`,
+      title: raw.title,
+      author: raw.user?.username || 'SoundCloud',
+      url: raw.permalink_url,
+      durationSec: 0,
+      durationFormatted: '',
+      thumbnail: artwork,
+      source: 'soundcloud',
+      kind: 'playlist',
+      trackCount: typeof raw.track_count === 'number' ? raw.track_count : undefined,
+    };
+  }
+
+  /**
+   * Постепенный поиск треков, видео, стримов и плейлистов с кэшированием и пагинацией.
+   * Вызывает onItem сразу, как только очередной провайдер отдаёт результаты.
+   */
+  public static async searchStream(
+    rawQuery: string,
+    platform: PlatformOption,
+    rawPage: number,
+    callbacks: {
+      onItem: (item: SearchResultItem) => void;
+      onComplete: (hasNextPage: boolean) => void;
+    },
+    signal?: AbortSignal
+  ): Promise<void> {
+    const query = rawQuery.trim();
+    const page = Math.max(1, Math.min(SEARCH_MAX_PAGES, Math.floor(rawPage) || 1));
+    if (!query) {
+      callbacks.onComplete(false);
+      return;
+    }
+
+    this.pruneSearchCache();
+
+    const cacheKey = `${platform}:${query.toLowerCase()}`;
+    let entry = this.searchCache.get(cacheKey);
+    if (!entry) {
+      entry = {
+        items: [],
+        seenKeys: new Set<string>(),
+        fetchedPages: 0,
+        exhausted: false,
+        updatedAt: Date.now(),
+      };
+      this.searchCache.set(cacheKey, entry);
+    }
+    entry.updatedAt = Date.now();
+
+    const startIdx = (page - 1) * SEARCH_PAGE_SIZE;
+    const endIdx = page * SEARCH_PAGE_SIZE;
+
+    // Отдаём уже закэшированные элементы текущей страницы сразу
+    let emittedCount = 0;
+    const emitIfInPage = (item: SearchResultItem, indexInCache: number) => {
+      if (signal?.aborted) return;
+      if (indexInCache >= startIdx && indexInCache < endIdx) {
+        callbacks.onItem(item);
+        emittedCount++;
+      }
+    };
+
+    for (let i = startIdx; i < Math.min(endIdx, entry.items.length); i++) {
+      emitIfInPage(entry.items[i], i);
+    }
+
+    // Если в кэше уже хватает элементов для всей страницы (или источник исчерпан) — завершаем
+    if (entry.items.length >= endIdx || entry.exhausted) {
+      const hasNext =
+        page < SEARCH_MAX_PAGES &&
+        (entry.items.length > endIdx || (!entry.exhausted && entry.items.length >= endIdx));
+      callbacks.onComplete(hasNext);
+      return;
+    }
+
+    const pushItem = (item: SearchResultItem | null) => {
+      if (!item || signal?.aborted) return;
+      const dedupeKey = `${item.source}:${item.id}`;
+      if (entry!.seenKeys.has(dedupeKey)) return;
+      entry!.seenKeys.add(dedupeKey);
+      const nextIndex = entry!.items.length;
+      entry!.items.push(item);
+      emitIfInPage(item, nextIndex);
+    };
+
+    const countBefore = entry.items.length;
+    const ytTargetLimit = Math.min(30, page * 8);
+    const scOffset = Math.max(0, (page - 1) * 6);
+    const spOffset = Math.max(0, (page - 1) * 6);
+
+    const tasks: Array<Promise<void>> = [];
+
+    if (platform === 'youtube' || platform === 'auto') {
+      tasks.push(
+        ytdl
+          .search(query, {
+            type: SearchType.Song,
+            limit: platform === 'youtube' ? ytTargetLimit : Math.min(18, page * 4),
+            signal,
+          })
+          .then((songs) => {
+            for (const s of songs) {
+              pushItem(this.mapYouTubeVideoToSearchItem(s, 'music'));
+            }
+          })
+          .catch(() => {})
+      );
+
+      tasks.push(
+        ytdl
+          .search(query, {
+            type: SearchType.Video,
+            limit: platform === 'youtube' ? ytTargetLimit : Math.min(18, page * 4),
+            signal,
+          })
+          .then((videos) => {
+            for (const v of videos) {
+              pushItem(this.mapYouTubeVideoToSearchItem(v, 'video'));
+            }
+          })
+          .catch(() => {})
+      );
+
+      if (page <= 2) {
+        tasks.push(
+          ytdl
+            .search(query, {
+              type: SearchType.Playlist,
+              limit: platform === 'youtube' ? 4 : 2,
+              signal,
+            })
+            .then((playlists) => {
+              for (const pl of playlists) {
+                pushItem(this.mapYouTubePlaylistToSearchItem(pl));
+              }
+            })
+            .catch(() => {})
+        );
+      }
+    }
+
+    if (platform === 'soundcloud' || platform === 'auto') {
+      tasks.push(
+        SoundCloudClient.searchTracks(
+          query,
+          platform === 'soundcloud' ? 8 : 4,
+          scOffset,
+          signal
+        )
+          .then((tracks) => {
+            for (const t of tracks) {
+              pushItem(this.mapSoundCloudTrackToSearchItem(t));
+            }
+          })
+          .catch(() => {})
+      );
+
+      if (page <= 2) {
+        tasks.push(
+          SoundCloudClient.searchPlaylists(
+            query,
+            platform === 'soundcloud' ? 3 : 2,
+            0,
+            signal
+          )
+            .then((playlists) => {
+              for (const pl of playlists) {
+                pushItem(this.mapSoundCloudPlaylistToSearchItem(pl));
+              }
+            })
+            .catch(() => {})
+        );
+      }
+    }
+
+    if (platform === 'spotify' || platform === 'auto') {
+      tasks.push(
+        SpotifyClient.searchCatalog(
+          query,
+          platform === 'spotify' ? 8 : 4,
+          spOffset,
+          signal
+        )
+          .then((items) => {
+            for (const item of items) {
+              pushItem(item);
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    await Promise.allSettled(tasks);
+    if (signal?.aborted) return;
+
+    entry.fetchedPages = Math.max(entry.fetchedPages, page);
+    const addedThisFetch = entry.items.length - countBefore;
+    if (addedThisFetch === 0 && entry.items.length <= endIdx) {
+      entry.exhausted = true;
+    }
+
+    const hasNext =
+      page < SEARCH_MAX_PAGES &&
+      (entry.items.length > endIdx || (!entry.exhausted && emittedCount >= SEARCH_PAGE_SIZE));
+    callbacks.onComplete(hasNext);
   }
 
   /**

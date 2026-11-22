@@ -28,7 +28,7 @@ function buildPlaylistListEmbed(username: string, list: UserPlaylist[]): EmbedBu
     .setTitle(`💾 Плейлисты пользователя ${username} (${list.length})`)
     .setDescription(lines)
     .setFooter({
-      text: 'Загрузить: /playlist load <название> или +pl load <название> (заменит текущую очередь)',
+      text: 'Загрузить: /playlist load <название> или +pl load <название> (добавит треки в очередь)',
     });
 }
 
@@ -76,7 +76,7 @@ export const command: Command = {
     .addSubcommand((sub) =>
       sub
         .setName('load')
-        .setDescription('Загрузить ваш сохранённый плейлист (текущая очередь будет полностью заменена!)')
+        .setDescription('Добавить треки вашего сохранённого плейлиста в очередь канала')
         .addStringOption((opt) =>
           opt
             .setName('name')
@@ -261,14 +261,16 @@ export const command: Command = {
           id: userId,
           tag: interaction.user.tag,
         });
-        const { loadedCount, firstTrack } = await worker.queue.replaceQueue(tracks);
+        const { addedCount, isPlayingNow } = await worker.queue.add(tracks);
+        const firstTrack = tracks[0];
 
         const embed = new EmbedBuilder()
           .setColor(0x23a55a)
-          .setTitle(`💾 Восстановлен плейлист: ${playlist.name}`)
+          .setTitle(`💾 Плейлист добавлен в очередь: ${playlist.name}`)
           .setDescription(
-            `Очередь канала заменена. Загружено треков: **${loadedCount}**.\n` +
-              `▶️ Сейчас играет: **${firstTrack.title}** \`[${firstTrack.durationFormatted}]\``
+            (isPlayingNow
+              ? `Загружено треков: **${addedCount}**.\n▶️ Сейчас играет: **${firstTrack.title}** \`[${firstTrack.durationFormatted}]\``
+              : `В конец текущей очереди добавлено треков: **${addedCount}**.`)
           )
           .setFooter({
             text: `Агент #${worker.id} • Запустил ${interaction.user.tag}`,
@@ -293,7 +295,7 @@ export const command: Command = {
       await message.reply(
         '💾 **Личные плейлисты — команды (`+playlist` или `+pl`):**\n' +
           '• `+pl save <название>` — сохранить текущую очередь канала в свой плейлист\n' +
-          '• `+pl load <название>` — загрузить плейлист *(старая очередь сотрётся!)*\n' +
+          '• `+pl load <название>` — добавить плейлист в очередь\n' +
           '• `+pl list` — список ваших сохранённых плейлистов\n' +
           '• `+pl show <название>` — посмотреть треки внутри плейлиста\n' +
           '• `+pl delete <название>` — удалить плейлист'
@@ -412,14 +414,16 @@ export const command: Command = {
           id: userId,
           tag: message.author.tag,
         });
-        const { loadedCount, firstTrack } = await worker.queue.replaceQueue(tracks);
+        const { addedCount, isPlayingNow } = await worker.queue.add(tracks);
+        const firstTrack = tracks[0];
 
         const embed = new EmbedBuilder()
           .setColor(0x23a55a)
-          .setTitle(`💾 Восстановлен плейлист: ${playlist.name}`)
+          .setTitle(`💾 Плейлист добавлен в очередь: ${playlist.name}`)
           .setDescription(
-            `Очередь канала заменена. Загружено треков: **${loadedCount}**.\n` +
-              `▶️ Сейчас играет: **${firstTrack.title}** \`[${firstTrack.durationFormatted}]\``
+            (isPlayingNow
+              ? `Загружено треков: **${addedCount}**.\n▶️ Сейчас играет: **${firstTrack.title}** \`[${firstTrack.durationFormatted}]\``
+              : `В конец текущей очереди добавлено треков: **${addedCount}**.`)
           )
           .setFooter({
             text: `Агент #${worker.id} • Запустил ${message.author.tag}`,
