@@ -29,6 +29,8 @@ export interface TrackSearchBarProps {
   onSearchSubmit: () => void;
   onDirectUrlSubmit: () => void;
   onAddSearchResult: (result: SearchResultItem) => void;
+  onOpenLink: (url: string) => void;
+  onCopyLink: (url: string) => void;
   onPrevSearchPage: () => void;
   onNextSearchPage: () => void;
   onCloseSearch: () => void;
@@ -61,6 +63,8 @@ export function TrackSearchBar({
   onSearchSubmit,
   onDirectUrlSubmit,
   onAddSearchResult,
+  onOpenLink,
+  onCopyLink,
   onPrevSearchPage,
   onNextSearchPage,
   onCloseSearch,
@@ -175,6 +179,8 @@ export function TrackSearchBar({
           disabled={disabled}
           t={t}
           onAddResult={onAddSearchResult}
+          onOpenLink={onOpenLink}
+          onCopyLink={onCopyLink}
           onPrevPage={onPrevSearchPage}
           onNextPage={onNextSearchPage}
           onClose={onCloseSearch}

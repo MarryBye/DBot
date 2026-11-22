@@ -247,6 +247,20 @@ export class AudioQueue {
     return removed ?? null;
   }
 
+  public async playAt(index: number): Promise<Track | null> {
+    if (!Number.isInteger(index) || index < 0 || index >= this.tracks.length) return null;
+    const [chosen] = this.tracks.splice(index, 1);
+    if (!chosen) return null;
+
+    if (this.currentTrack && this.loopMode === 'queue') {
+      this.tracks.push(this.currentTrack);
+    }
+
+    this.mixer.clearMusic();
+    await this.play(chosen);
+    return chosen;
+  }
+
   public move(fromIndex: number, toIndex: number): boolean {
     if (
       fromIndex < 0 ||

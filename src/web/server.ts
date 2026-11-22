@@ -1551,6 +1551,36 @@ export function startWebServer(discordClient: Client): http.Server {
           return;
         }
 
+        if (pathname === '/api/queue/play-now' && method === 'POST') {
+          const body = await readJsonBody<{ index?: number }>(req);
+          const idx = Number(body.index);
+          if (!Number.isInteger(idx) || idx < 0 || idx >= worker.queue.tracks.length) {
+            sendJson(res, 404, { error: 'Трек с таким индексом не найден.' });
+            return;
+          }
+          try {
+            const track = await worker.queue.playAt(idx);
+            if (!track) {
+              sendJson(res, 404, { error: 'Трек с таким индексом не найден.' });
+              return;
+            }
+            workerPool.emitActivity({
+              guildId: activeGuildId,
+              channelId: userChannelId,
+              action: 'play_now',
+              actorId: session.userId,
+              actorName: ctx.displayName,
+              detail: track.title,
+            });
+            sendJson(res, 200, { ok: true, track: serializePublicTrack(track) });
+          } catch (err: any) {
+            sendJson(res, 400, {
+              error: redactSensitiveText(err?.message || 'Не удалось запустить трек.'),
+            });
+          }
+          return;
+        }
+
         if (pathname === '/api/queue/remove' && method === 'POST') {
           const body = await readJsonBody<{ index?: number }>(req);
           const removed = worker.queue.removeAt(Number(body.index));

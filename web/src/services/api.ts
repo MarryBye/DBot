@@ -56,6 +56,7 @@ export interface DashboardApiClient {
   stop(): Promise<void>;
   setVolume(volume: number): Promise<void>;
   moveQueueItem(from: number, to: number): Promise<void>;
+  playQueueItemNow(index: number): Promise<void>;
   removeQueueItem(index: number): Promise<void>;
   clearQueue(): Promise<void>;
   listPlaylists(): Promise<UserPlaylist[]>;
@@ -290,6 +291,13 @@ export function createHttpApiClient(): DashboardApiClient {
       await request('/api/queue/move', {
         method: 'POST',
         body: JSON.stringify({ from, to }),
+      });
+    },
+
+    playQueueItemNow: async (index) => {
+      await request('/api/queue/play-now', {
+        method: 'POST',
+        body: JSON.stringify({ index }),
       });
     },
 

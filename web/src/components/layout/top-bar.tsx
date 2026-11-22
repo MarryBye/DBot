@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/select';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
+import { TruncatedText } from '@/components/ui/truncated-text';
 
 export interface TopBarProps {
   guildId: string | null;
@@ -92,9 +93,11 @@ export function TopBar({
       {voice.inVoice && (
         <>
           <span className="text-xs text-fg-muted">/</span>
-          <span className="max-w-[180px] truncate text-xs font-semibold text-fg-primary">
-            {voice.channelName}
-          </span>
+          <TruncatedText
+            as="span"
+            text={voice.channelName || ''}
+            className="max-w-[180px] text-xs font-semibold text-fg-primary"
+          />
 
           <div className="ml-1 flex items-center">
             {worker ? (
@@ -190,10 +193,12 @@ export function TopBar({
 
           <div className="flex items-center gap-2 pr-1">
             <Avatar src={user.avatarUrl} alt={user.displayName} size="sm" />
-            <div className="flex items-center gap-1.5">
-              <span className="max-w-[140px] truncate text-sm font-medium text-fg-primary">
-                {user.displayName}
-              </span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <TruncatedText
+                as="span"
+                text={user.displayName}
+                className="max-w-[140px] text-sm font-medium text-fg-primary"
+              />
               {user.isAdmin && <Badge variant="accent">{t('app.adminBadge')}</Badge>}
             </div>
           </div>

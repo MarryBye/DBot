@@ -18,10 +18,13 @@ export interface QueueCardProps {
   canSavePlaylist: boolean;
   isSavingPlaylist: boolean;
   t: TranslateFn;
+  onPlayTrackNow: (index: number) => void;
   onMoveTrack: (fromIndex: number, toIndex: number) => void;
   onRemoveTrack: (index: number) => void;
   onClearQueue: () => void;
   onSavePlaylist: (name: string) => void;
+  onOpenLink: (url: string) => void;
+  onCopyLink: (url: string) => void;
 }
 
 export function QueueCard({
@@ -30,10 +33,13 @@ export function QueueCard({
   canSavePlaylist,
   isSavingPlaylist,
   t,
+  onPlayTrackNow,
   onMoveTrack,
   onRemoveTrack,
   onClearQueue,
   onSavePlaylist,
+  onOpenLink,
+  onCopyLink,
 }: QueueCardProps) {
   const [saveOpen, setSaveOpen] = React.useState(false);
   const [playlistName, setPlaylistName] = React.useState('');
@@ -153,9 +159,13 @@ export function QueueCard({
                     isDragging={dragFromIndex === globalIdx}
                     isDragOver={dragOverIndex === globalIdx && dragFromIndex !== globalIdx}
                     t={t}
+                    onPlayNow={onPlayTrackNow}
+                    onMoveToTop={(i) => onMoveTrack(i, 0)}
                     onMoveUp={(i) => onMoveTrack(i, i - 1)}
                     onMoveDown={(i) => onMoveTrack(i, i + 1)}
                     onRemove={onRemoveTrack}
+                    onOpenLink={onOpenLink}
+                    onCopyLink={onCopyLink}
                     onDragStart={setDragFromIndex}
                     onDragOver={setDragOverIndex}
                     onDrop={(toIdx) => {

@@ -25,6 +25,8 @@ export interface PlaylistsSectionProps {
   onLoadPlaylist: (playlist: UserPlaylist) => void;
   onDeletePlaylist: (playlist: UserPlaylist) => void;
   onToggleExpand: (id: number) => void;
+  onOpenLink: (url: string) => void;
+  onCopyLink: (url: string) => void;
 }
 
 export function PlaylistsSection({
@@ -40,6 +42,8 @@ export function PlaylistsSection({
   onLoadPlaylist,
   onDeletePlaylist,
   onToggleExpand,
+  onOpenLink,
+  onCopyLink,
 }: PlaylistsSectionProps) {
   const [name, setName] = React.useState('');
   const [page, setPage] = React.useState(1);
@@ -115,6 +119,8 @@ export function PlaylistsSection({
                   onLoad={onLoadPlaylist}
                   onToggleExpand={onToggleExpand}
                   onDelete={onDeletePlaylist}
+                  onOpenLink={onOpenLink}
+                  onCopyLink={onCopyLink}
                 />
               ))}
             </div>

@@ -19,6 +19,8 @@ export interface SearchResultsDropdownProps {
   disabled: boolean;
   t: TranslateFn;
   onAddResult: (result: SearchResultItem) => void;
+  onOpenLink: (url: string) => void;
+  onCopyLink: (url: string) => void;
   onPrevPage: () => void;
   onNextPage: () => void;
   onClose: () => void;
@@ -36,6 +38,8 @@ export function SearchResultsDropdown({
   disabled,
   t,
   onAddResult,
+  onOpenLink,
+  onCopyLink,
   onPrevPage,
   onNextPage,
   onClose,
@@ -94,6 +98,8 @@ export function SearchResultsDropdown({
                 disabled={disabled}
                 t={t}
                 onAdd={onAddResult}
+                onOpenLink={onOpenLink}
+                onCopyLink={onCopyLink}
               />
             ))}
 

@@ -7,6 +7,7 @@ import type {
   LoopMode,
   MemeSound,
   PlatformOption,
+  SearchResultItem,
   TrackItem,
   TrackSource,
   UserPlaylist,
@@ -188,6 +189,7 @@ export function createMockApiClient(): DashboardApiClient {
   let sfxTimer: ReturnType<typeof setTimeout> | null = null;
 
   const listeners = new Set<SseHandlers>();
+  const previewResultByUrl = new Map<string, SearchResultItem>();
 
   let currentTrack: TrackItem | null = INITIAL_TRACKS[0];
   let queue: TrackItem[] = INITIAL_TRACKS.slice(1);
@@ -582,36 +584,53 @@ export function createMockApiClient(): DashboardApiClient {
     },
 
     searchTracks: (query, platform, page, callbacks, signal) =>
-      streamPreviewSearchPage(query, platform, page, callbacks, signal),
+      streamPreviewSearchPage(
+        query,
+        platform,
+        page,
+        {
+          onItem: (item) => {
+            if (item.url) {
+              previewResultByUrl.set(item.url, item);
+            }
+            callbacks.onItem(item);
+          },
+          onComplete: callbacks.onComplete,
+        },
+        signal
+      ),
 
     playTrack: async (query, platform) => {
       workerConnected = true;
-      const source = resolveSource(platform);
-      const isPlaylistLink = /playlist|\/sets\/|list=/i.test(query);
+      const matched = previewResultByUrl.get(query);
+      const source = matched?.source ?? resolveSource(platform);
+      const isPlaylistLink =
+        matched?.kind === 'playlist' || /playlist|\/sets\/|list=/i.test(query);
 
       const tracksToAdd: TrackItem[] = isPlaylistLink
         ? [1, 2, 3].map((num) => ({
             id: `trk-${Date.now()}-${num}`,
-            title: `Playlist Track #${num}`,
-            author: 'Artist',
-            url: query,
-            originalUrl: query,
+            title: matched ? `${matched.title} #${num}` : `Playlist Track #${num}`,
+            author: matched?.author || 'Artist',
+            url: matched?.url || query,
+            originalUrl: matched?.url || query,
             durationSec: 190 + num * 18,
             durationFormatted: formatDuration(190 + num * 18),
-            thumbnail: null,
+            thumbnail: matched?.thumbnail ?? null,
             source,
             requestedBy: { id: '1', tag: 'Alex' },
           }))
         : [
             {
               id: `trk-${Date.now()}`,
-              title: query,
-              author: 'Artist',
-              url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-              originalUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-              durationSec: 215,
-              durationFormatted: formatDuration(215),
-              thumbnail: null,
+              title: matched?.title || query,
+              author: matched?.author || 'Artist',
+              url: matched?.url || (/^https?:\/\//i.test(query) ? query : 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'),
+              originalUrl:
+                matched?.url || (/^https?:\/\//i.test(query) ? query : 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'),
+              durationSec: matched?.durationSec || 215,
+              durationFormatted: matched?.durationFormatted || formatDuration(matched?.durationSec || 215),
+              thumbnail: matched?.thumbnail ?? null,
               source,
               requestedBy: { id: '1', tag: 'Alex' },
             },
@@ -692,6 +711,22 @@ export function createMockApiClient(): DashboardApiClient {
       copy.splice(to, 0, item);
       queue = copy;
       emitState();
+    },
+
+    playQueueItemNow: async (index) => {
+      if (index < 0 || index >= queue.length) return;
+      const copy = [...queue];
+      const [chosen] = copy.splice(index, 1);
+      if (!chosen) return;
+      if (loopMode === 'queue' && currentTrack) {
+        copy.push(currentTrack);
+      }
+      currentTrack = chosen;
+      queue = copy;
+      progressSec = 0;
+      isPaused = false;
+      emitState();
+      emitActivity('play_now', chosen.title);
     },
 
     removeQueueItem: async (index) => {

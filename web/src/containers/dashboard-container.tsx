@@ -213,6 +213,13 @@ export function DashboardContainer() {
             5500
           );
           break;
+        case 'play_now':
+          pushToast(
+            tr('activity.play_now', { actor, title: event.detail || '' }),
+            'info',
+            5000
+          );
+          break;
         case 'shuffle':
           pushToast(tr('activity.shuffle', { actor }), 'info', 5000);
           break;
@@ -714,6 +721,14 @@ export function DashboardContainer() {
     }
   };
 
+  const handlePlayTrackNow = async (index: number) => {
+    try {
+      await apiClient.playQueueItemNow(index);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    }
+  };
+
   const handleRemoveTrack = async (index: number) => {
     try {
       await apiClient.removeQueueItem(index);
@@ -727,6 +742,25 @@ export function DashboardContainer() {
       await apiClient.clearQueue();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : t('error.generic'), 'danger');
+    }
+  };
+
+  const handleOpenLink = (url: string) => {
+    const safe = safeHttpUrl(url);
+    if (!safe) return;
+    window.open(safe, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleCopyLink = async (url: string) => {
+    const safe = safeHttpUrl(url);
+    if (!safe) return;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(safe);
+        pushToast(t('ctx.linkCopied'), 'info', 2500);
+      }
+    } catch {
+      // Clipboard access denied or unavailable
     }
   };
 
@@ -1079,7 +1113,7 @@ export function DashboardContainer() {
   const busyAgentsCount = Math.max(0, state.pool.totalCount - state.pool.availableCount);
 
   return (
-    <div className="flex min-h-screen flex-col bg-canvas text-fg-primary">
+    <div className="flex min-h-screen flex-col overflow-x-clip bg-canvas text-fg-primary">
       <TopBar
         guildId={state.guildId}
         guildName={state.guildName}
@@ -1136,12 +1170,14 @@ export function DashboardContainer() {
               onSearchSubmit={handleSearchSubmit}
               onDirectUrlSubmit={handleDirectUrlSubmit}
               onAddSearchResult={handleAddSearchResult}
+              onOpenLink={handleOpenLink}
+              onCopyLink={handleCopyLink}
               onPrevSearchPage={handlePrevSearchPage}
               onNextSearchPage={handleNextSearchPage}
               onCloseSearch={handleCloseSearch}
             />
 
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1.15fr] lg:items-start">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:items-start">
               <NowPlayingCard
                 inVoice={inVoice}
                 worker={worker}
@@ -1156,6 +1192,8 @@ export function DashboardContainer() {
                 onCycleLoop={handleCycleLoop}
                 onStop={handleStop}
                 onVolumeChange={handleVolumeChange}
+                onOpenLink={handleOpenLink}
+                onCopyLink={handleCopyLink}
               />
 
               <QueueCard
@@ -1164,8 +1202,11 @@ export function DashboardContainer() {
                 canSavePlaylist={inVoice && hasAnyTrack}
                 isSavingPlaylist={isSavingPlaylist}
                 t={t}
+                onPlayTrackNow={handlePlayTrackNow}
                 onMoveTrack={handleMoveTrack}
                 onRemoveTrack={handleRemoveTrack}
+                onOpenLink={handleOpenLink}
+                onCopyLink={handleCopyLink}
                 onClearQueue={handleClearQueue}
                 onSavePlaylist={handleSavePlaylist}
               />
@@ -1197,6 +1238,8 @@ export function DashboardContainer() {
               onLoadPlaylist={handleLoadPlaylist}
               onDeletePlaylist={handleDeletePlaylist}
               onToggleExpand={handleTogglePlaylistExpand}
+              onOpenLink={handleOpenLink}
+              onCopyLink={handleCopyLink}
             />
           </TabsContent>
 
@@ -1226,7 +1269,13 @@ export function DashboardContainer() {
           </TabsContent>
 
           <TabsContent value="agents">
-            <AgentsSection pool={state.pool} activeGuildId={state.guildId} t={t} />
+            <AgentsSection
+              pool={state.pool}
+              activeGuildId={state.guildId}
+              t={t}
+              onOpenLink={handleOpenLink}
+              onCopyLink={handleCopyLink}
+            />
           </TabsContent>
 
           {state.user.isAdmin && (

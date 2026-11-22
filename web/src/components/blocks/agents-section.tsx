@@ -10,9 +10,17 @@ export interface AgentsSectionProps {
   pool: WorkerPoolState;
   activeGuildId: string | null;
   t: TranslateFn;
+  onOpenLink: (url: string) => void;
+  onCopyLink: (url: string) => void;
 }
 
-export function AgentsSection({ pool, activeGuildId, t }: AgentsSectionProps) {
+export function AgentsSection({
+  pool,
+  activeGuildId,
+  t,
+  onOpenLink,
+  onCopyLink,
+}: AgentsSectionProps) {
   const [expandedId, setExpandedId] = React.useState<number | null>(null);
 
   const activeCount = pool.workers.filter((w) => w.isOnline && w.isInChannel).length;
@@ -63,6 +71,8 @@ export function AgentsSection({ pool, activeGuildId, t }: AgentsSectionProps) {
                 onToggleExpand={(id) =>
                   setExpandedId((prev) => (prev === id ? null : id))
                 }
+                onOpenLink={onOpenLink}
+                onCopyLink={onCopyLink}
               />
             ))}
           </div>

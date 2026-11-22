@@ -27,6 +27,7 @@ export type ChannelActivityAction =
   | 'leave'
   | 'clear_queue'
   | 'skip'
+  | 'play_now'
   | 'remove_track'
   | 'shuffle'
   | 'pause'

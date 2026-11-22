@@ -5,6 +5,7 @@ import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import { ContextMenu, type ContextMenuItem } from '@/components/ui/context-menu';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Icon } from '@/components/ui/icon';
 import { PlatformBadge } from '@/components/ui/platform-badge';
@@ -13,6 +14,7 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { Separator } from '@/components/ui/separator';
 import { Slider } from '@/components/ui/slider';
 import { TrackThumbnail } from '@/components/ui/track-thumbnail';
+import { TruncatedText } from '@/components/ui/truncated-text';
 
 export interface NowPlayingCardProps {
   inVoice: boolean;
@@ -28,6 +30,8 @@ export interface NowPlayingCardProps {
   onCycleLoop: () => void;
   onStop: () => void;
   onVolumeChange: (value: number) => void;
+  onOpenLink: (url: string) => void;
+  onCopyLink: (url: string) => void;
 }
 
 export function NowPlayingCard({
@@ -44,6 +48,8 @@ export function NowPlayingCard({
   onCycleLoop,
   onStop,
   onVolumeChange,
+  onOpenLink,
+  onCopyLink,
 }: NowPlayingCardProps) {
   const track = worker?.currentTrack ?? null;
   const canControl = inVoice && worker !== null;
@@ -102,49 +108,103 @@ export function NowPlayingCard({
             description={t('player.emptyDescription')}
           />
         ) : (
-          <div className="space-y-4">
-            <div className="flex flex-col gap-3.5 sm:flex-row sm:items-start">
-              <TrackThumbnail src={track.thumbnail} alt={track.title} size="lg" />
+          <ContextMenu
+            items={
+              [
+                {
+                  id: 'toggle-pause',
+                  label: worker?.isPaused ? t('player.resume') : t('player.pause'),
+                  icon: worker?.isPaused ? 'play' : 'pause',
+                  disabled: !canControl,
+                  onSelect: onTogglePause,
+                },
+                {
+                  id: 'skip',
+                  label: t('player.skip'),
+                  icon: 'skip-forward',
+                  disabled: !canControl,
+                  onSelect: onSkip,
+                },
+                ...(safeLink
+                  ? [
+                      {
+                        id: 'open',
+                        label: t('ctx.openLink'),
+                        icon: 'external-link' as const,
+                        separatorBefore: true,
+                        onSelect: () => onOpenLink(safeLink),
+                      },
+                      {
+                        id: 'copy',
+                        label: t('ctx.copyLink'),
+                        icon: 'copy' as const,
+                        onSelect: () => onCopyLink(safeLink),
+                      },
+                    ]
+                  : []),
+                {
+                  id: 'stop',
+                  label: t('player.stop'),
+                  icon: 'square',
+                  disabled: !canControl,
+                  destructive: true,
+                  separatorBefore: true,
+                  onSelect: onStop,
+                },
+              ] satisfies ContextMenuItem[]
+            }
+          >
+            <div className="space-y-4">
+              <div className="flex min-w-0 flex-col gap-3.5 sm:flex-row sm:items-start">
+                <TrackThumbnail src={track.thumbnail} alt={track.title} size="lg" />
 
-              <div className="min-w-0 flex-1 space-y-1.5">
-                <PlatformBadge source={track.source} />
-                <div className="min-w-0">
-                  {safeLink ? (
-                    <a
-                      href={safeLink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title={track.title || track.originalUrl}
-                      className="flex w-full min-w-0 items-center gap-1.5 text-base font-semibold leading-snug text-fg-primary hover:text-accent hover:underline"
-                    >
-                      <span className="min-w-0 truncate">{track.title || track.originalUrl}</span>
-                      <Icon name="external-link" size="xs" className="text-fg-muted" />
-                    </a>
-                  ) : (
-                    <div className="truncate text-base font-semibold leading-snug text-fg-primary">
-                      {track.title || track.originalUrl}
-                    </div>
+                <div className="min-w-0 flex-1 space-y-1.5 overflow-hidden">
+                  <PlatformBadge source={track.source} />
+                  <div className="min-w-0">
+                    {safeLink ? (
+                      <a
+                        href={safeLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex w-full min-w-0 items-center gap-1.5 text-base font-semibold leading-snug text-fg-primary hover:text-accent hover:underline"
+                      >
+                        <TruncatedText text={track.title || track.originalUrl} className="flex-1" />
+                        <Icon name="external-link" size="xs" className="text-fg-muted" />
+                      </a>
+                    ) : (
+                      <TruncatedText
+                        text={track.title || track.originalUrl}
+                        as="div"
+                        className="text-base font-semibold leading-snug text-fg-primary"
+                      />
+                    )}
+                  </div>
+                  {track.author && (
+                    <TruncatedText
+                      text={track.author}
+                      as="div"
+                      className="text-sm text-fg-secondary"
+                    />
                   )}
-                </div>
-                {track.author && (
-                  <div className="truncate text-sm text-fg-secondary">{track.author}</div>
-                )}
-                <div className="text-xs text-fg-muted">
-                  {t('player.requestedBy', {
-                    user: track.requestedBy?.tag || t('player.unknownUser'),
-                  })}
+                  <TruncatedText
+                    text={t('player.requestedBy', {
+                      user: track.requestedBy?.tag || t('player.unknownUser'),
+                    })}
+                    as="div"
+                    className="text-xs text-fg-muted"
+                  />
                 </div>
               </div>
-            </div>
 
-            <div className="space-y-1.5">
-              <Progress value={progressPct} />
-              <div className="flex items-center justify-between text-xs tabular-nums text-fg-muted">
-                <span>{formatDuration(currentProgressSec)}</span>
-                <span>{track.durationFormatted || formatDuration(totalSec)}</span>
+              <div className="space-y-1.5">
+                <Progress value={progressPct} />
+                <div className="flex items-center justify-between text-xs tabular-nums text-fg-muted">
+                  <span>{formatDuration(currentProgressSec)}</span>
+                  <span>{track.durationFormatted || formatDuration(totalSec)}</span>
+                </div>
               </div>
             </div>
-          </div>
+          </ContextMenu>
         )}
 
         <Separator />

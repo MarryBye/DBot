@@ -11,6 +11,7 @@ import { Icon } from '@/components/ui/icon';
 import { PlatformBadge } from '@/components/ui/platform-badge';
 import { Progress } from '@/components/ui/progress';
 import { SectionHeader } from '@/components/ui/section-header';
+import { TruncatedText } from '@/components/ui/truncated-text';
 import { UserChip } from '@/components/ui/user-chip';
 import { VinylDisc } from '@/components/ui/vinyl-disc';
 
@@ -125,7 +126,7 @@ export function WatchTogetherSection({
       : null;
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_290px] lg:items-start">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_290px] lg:items-start">
       {/* Main Watch Stage */}
       <Card>
         <CardHeader className="border-b border-border pb-3">
@@ -216,18 +217,21 @@ export function WatchTogetherSection({
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        title={track.title || track.originalUrl}
                         className="flex w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
                       >
-                        <span className="min-w-0 truncate">{track.title || track.originalUrl}</span>
+                        <TruncatedText text={track.title || track.originalUrl} className="flex-1" />
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (
-                      <span className="block truncate">{track.title || track.originalUrl}</span>
+                      <TruncatedText text={track.title || track.originalUrl} />
                     )}
                   </div>
                   {track.author && (
-                    <div className="truncate text-sm text-fg-secondary">{track.author}</div>
+                    <TruncatedText
+                      text={track.author}
+                      as="div"
+                      className="text-sm text-fg-secondary"
+                    />
                   )}
                 </div>
 
@@ -282,18 +286,21 @@ export function WatchTogetherSection({
                         href={safeLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        title={track.title || track.originalUrl}
                         className="flex w-full min-w-0 items-center gap-1.5 hover:text-accent hover:underline"
                       >
-                        <span className="min-w-0 truncate">{track.title || track.originalUrl}</span>
+                        <TruncatedText text={track.title || track.originalUrl} className="flex-1" />
                         <Icon name="external-link" size="xs" className="text-fg-muted" />
                       </a>
                     ) : (
-                      <span className="block truncate">{track.title || track.originalUrl}</span>
+                      <TruncatedText text={track.title || track.originalUrl} />
                     )}
                   </div>
                   {track.author && (
-                    <div className="truncate text-sm text-fg-secondary">{track.author}</div>
+                    <TruncatedText
+                      text={track.author}
+                      as="div"
+                      className="text-sm text-fg-secondary"
+                    />
                   )}
                   <div className="text-xs text-fg-muted">
                     {t('player.requestedBy', {
