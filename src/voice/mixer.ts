@@ -5,7 +5,8 @@ import type { PcmDecoderHandle } from './ffmpeg.js';
 const FRAME_MS = 20;
 const FRAME_BYTES = 3840; // 48000 Hz * 0.02s * 2 ch * 2 bytes (s16le)
 const SAMPLES_PER_FRAME = FRAME_BYTES / 2; // 1920 Int16 samples
-const MAX_BUFFER_BYTES = FRAME_BYTES * 64; // ~240 KB (~1.28s предбуфер)
+const MAX_BUFFER_BYTES = FRAME_BYTES * 64; // ~240 KB (~1.28s предбуфер на источник)
+const MAX_OUTPUT_QUEUE_BYTES = FRAME_BYTES * 2; // Максимум 40мс в выходном буфере (нулевая задержка мемов!)
 
 const DUCK_TARGET_GAIN = 0.18; // Музыка приглушается до 18% во время мема
 const DUCK_DOWN_STEP = 0.14;   // Быстрое плавное приглушение (~120мс)
@@ -55,15 +56,11 @@ class BufferedPcmSource {
     return this.bufferedBytes > 0;
   }
 
-  /**
-   * Извлекает ровно FRAME_BYTES (или меньше, если поток заканчивается).
-   * Возвращает null, если данных временно нет (буферизация) или поток завершён.
-   */
   public readFrame(): Buffer | null {
     if (this.closed || this.bufferedBytes === 0) return null;
 
     const toRead = Math.min(FRAME_BYTES, this.bufferedBytes);
-    const out = Buffer.alloc(FRAME_BYTES); // остаток автоматически заполнен нулями (тишина)
+    const out = Buffer.alloc(FRAME_BYTES);
     let offset = 0;
 
     while (offset < toRead && this.chunks.length > 0) {
@@ -109,9 +106,9 @@ export interface AudioMixerCallbacks {
 
 /**
  * Реалтайм PCM-микшер (48kHz Stereo s16le):
- * - Воспроизводит музыку и звуки саундборда одновременно в одном потоке.
- * - Плавно приглушает музыку до 18% при запуске любого мема/звука и плавно возвращает громкость обратно!
- * - Поддерживает наложение нескольких звуков одновременно без паузы музыки.
+ * - Жёсткий контроль backpressure (не более 40мс буфера на выходе -> никаких накоплений тишины!).
+ * - Плавно приглушает музыку до 18% при запуске любого мема/звука и плавно возвращает громкость обратно.
+ * - Поддерживает наложение до 4 звуков одновременно поверх музыки.
  */
 export class AudioMixer {
   public volume = 80;
@@ -134,21 +131,23 @@ export class AudioMixer {
   }
 
   public get isActive(): boolean {
-    return this.output !== null;
+    return this.output !== null && !this.output.destroyed;
   }
 
   /**
-   * Создаёт (если ещё не запущен) непрерывный Raw PCM AudioResource для AudioPlayer.
+   * Создаёт (или пересоздаёт при forceRecreate=true) Raw PCM AudioResource для AudioPlayer.
    */
-  public ensureResource(): { resource: AudioResource; created: boolean } {
-    if (this.output) {
-      return { resource: null as unknown as AudioResource, created: false };
+  public ensureResource(forceRecreate = false): { resource: AudioResource | null; created: boolean } {
+    if (this.output && !this.output.destroyed && !forceRecreate) {
+      return { resource: null, created: false };
     }
 
-    this.output = new PassThrough({ highWaterMark: FRAME_BYTES * 8 });
+    this.stopLoopAndCloseOutput();
+
+    this.output = new PassThrough({ highWaterMark: FRAME_BYTES * 4 });
     const resource = createAudioResource(this.output, {
       inputType: StreamType.Raw,
-      inlineVolume: false, // громкость и ducking управляются прямо в микшере с нулевой задержкой
+      inlineVolume: false,
     });
 
     this.startLoop();
@@ -172,7 +171,6 @@ export class AudioMixer {
   }
 
   public addSfx(name: string, handle: PcmDecoderHandle): void {
-    // Ограничиваем максимум 4 одновременных наложенных звука
     if (this.sfxSources.length >= 4) {
       const oldest = this.sfxSources.shift();
       oldest?.destroy();
@@ -213,7 +211,6 @@ export class AudioMixer {
   private scheduleNextTick(): void {
     const now = process.hrtime.bigint();
     this.nextTickNs += BigInt(FRAME_MS) * 1_000_000n;
-    // Если сильно отстали (например, GC пауза), синхронизируемся
     if (this.nextTickNs < now - 100_000_000n) {
       this.nextTickNs = now;
     }
@@ -222,7 +219,7 @@ export class AudioMixer {
     this.tickTimer = setTimeout(() => {
       this.tickTimer = null;
       this.processFrame();
-      if (this.output) {
+      if (this.output && !this.output.destroyed) {
         this.scheduleNextTick();
       }
     }, delayMs);
@@ -242,7 +239,7 @@ export class AudioMixer {
   }
 
   private processFrame(): void {
-    if (!this.output) return;
+    if (!this.output || this.output.destroyed) return;
 
     // 1. Очищаем завершившиеся SFX
     const prevSfxCount = this.sfxSources.length;
@@ -268,14 +265,20 @@ export class AudioMixer {
       this.callbacks.onMusicEnd();
     }
 
-    // 3. Если больше нет ни музыки, ни SFX — аккуратно завершаем выходной поток
+    // 3. Если больше нет ни музыки, ни SFX — аккуратно закрываем выходной поток
     if (!this.musicSource && this.sfxSources.length === 0) {
       this.currentDuckGain = 1.0;
       this.stopLoopAndCloseOutput();
       return;
     }
 
-    // 4. Плавное приглушение музыки (Audio Ducking), когда играет хотя бы один звук саундборда
+    // 4. Жёсткий backpressure (проверяем И readableLength, И writableLength!):
+    // PassThrough переносит байты в readableLength — так буфер никогда не превышает 40мс!
+    if (this.output.readableLength + this.output.writableLength >= MAX_OUTPUT_QUEUE_BYTES) {
+      return;
+    }
+
+    // 5. Плавное приглушение музыки (Audio Ducking), когда играет хотя бы один звук саундборда
     const hasActiveSfx = this.sfxSources.length > 0;
     const targetDuck = hasActiveSfx ? DUCK_TARGET_GAIN : 1.0;
     if (this.currentDuckGain > targetDuck) {
@@ -284,7 +287,7 @@ export class AudioMixer {
       this.currentDuckGain = Math.min(targetDuck, this.currentDuckGain + DUCK_UP_STEP);
     }
 
-    // 5. Читаем 20мс кадр музыки (если не на паузе) и кадры всех активных SFX
+    // 6. Читаем 20мс кадр музыки (если не на паузе) и кадры всех активных SFX
     const musicFrame =
       this.musicSource && !this.musicPaused ? this.musicSource.readFrame() : null;
 
@@ -299,7 +302,6 @@ export class AudioMixer {
     if (musicFrame || sfxFrames.length > 0) {
       const masterGain = this.volume / 100;
       const musicGain = masterGain * this.currentDuckGain;
-      // Мемы звучат чётко поверх приглушённой музыки
       const sfxGain = Math.min(1.25, masterGain * 1.1);
 
       for (let i = 0; i < SAMPLES_PER_FRAME; i++) {
@@ -313,7 +315,6 @@ export class AudioMixer {
           sample += sfxFrames[j].readInt16LE(byteOffset) * sfxGain;
         }
 
-        // Защита от клиппинга (перегруза)
         if (sample > 32767) sample = 32767;
         else if (sample < -32768) sample = -32768;
 

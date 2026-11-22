@@ -1,10 +1,14 @@
-import { Ytdl } from '@distube/ytdl-core';
+import { Client as YtdlClient, Ytdl } from '@distube/ytdl-core';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { dataDir } from '../db/index.js';
-import { spawnPcmDecoder, type PcmDecoderHandle } from './ffmpeg.js';
+import {
+  spawnPcmDecoder,
+  verifyPcmStream,
+  type PcmDecoderHandle,
+} from './ffmpeg.js';
 
 export type PlatformOption = 'auto' | 'youtube' | 'soundcloud' | 'spotify';
 
@@ -101,7 +105,6 @@ function cleanTrackQueryForFallback(title: string, author?: string): string {
 }
 
 function loadYouTubeCookie(): string | undefined {
-  // 1. Проверяем файл data/cookies.txt (экспорт Netscape из браузера)
   const cookieFilePath = path.join(dataDir, 'cookies.txt');
   if (fs.existsSync(cookieFilePath)) {
     const content = fs.readFileSync(cookieFilePath, 'utf-8').replace(/\r\n/g, '\n').trim();
@@ -111,7 +114,6 @@ function loadYouTubeCookie(): string | undefined {
     }
   }
 
-  // 2. Или переменная окружения YT_COOKIE в .env
   if (config.ytCookie && config.ytCookie.trim().length > 10) {
     console.log('🍪 [YouTube] Загружены cookies из YT_COOKIE (.env)');
     return config.ytCookie.trim();
@@ -121,7 +123,15 @@ function loadYouTubeCookie(): string | undefined {
 }
 
 const initialCookie = loadYouTubeCookie();
-const ytdl = new Ytdl(initialCookie ? { cookie: initialCookie } : undefined);
+// При наличии cookies ставим лёгкие клиенты с поддержкой cookies (Tv, WebEmbedded) первыми,
+// избегая тяжёлых PO-token BotGuard потоков на слабом CPU (Oracle E2.1.Micro)!
+const ytdl = new Ytdl({
+  ...(initialCookie ? { cookie: initialCookie } : {}),
+  clients: initialCookie
+    ? [YtdlClient.Tv, YtdlClient.WebEmbedded, YtdlClient.VisionOS, YtdlClient.Mweb]
+    : [YtdlClient.VisionOS, YtdlClient.WebEmbedded, YtdlClient.Tv],
+  timeoutMs: 12_000,
+});
 
 // ========================================================
 // Внутренний клиент SoundCloud API v2 (без сторонних пакетов)
@@ -255,10 +265,6 @@ class SoundCloudClient {
     };
   }
 
-  /**
-   * Ищет на SoundCloud полный (не Go+ SNIP) поток для любого трека — используется как
-   * мгновенный фолбэк, если YouTube заблокировал IP облачного сервера ("Sign in to confirm you're not a bot").
-   */
   public static async findDirectStreamForQuery(query: string): Promise<string | null> {
     const candidates = await this.searchTracks(query, 8);
     for (const raw of candidates) {
@@ -267,7 +273,6 @@ class SoundCloudClient {
         return this.fetchMediaStreamUrl(picked.url);
       }
     }
-    // Если нашлись только любые треки с transcodings (даже без фильтрации) — пробуем первый рабочий
     for (const raw of candidates) {
       const t = raw?.media?.transcodings?.[0];
       if (t?.url) {
@@ -536,7 +541,6 @@ export class MusicResolver {
       return this.searchYouTube(trimmed, requestedBy);
     }
 
-    // Режим AUTO: пробуем YouTube, при ошибке автоматически фолбэк на SoundCloud
     try {
       const ytTracks = await this.searchYouTube(trimmed, requestedBy);
       if (ytTracks.length > 0) return ytTracks;
@@ -647,7 +651,6 @@ export class MusicResolver {
       }
     }
 
-    // Пробуем ytdl.getInfo, если YouTube заблокировал IP — вытаскиваем метаданные через открытый YouTube oEmbed!
     try {
       const info = await ytdl.getInfo(url);
       const details = info.videoDetails;
@@ -733,27 +736,38 @@ export class MusicResolver {
   }
 
   /**
-   * Создаёт декодированный PCM-поток (48kHz stereo s16le) для AudioMixer.
-   * Если YouTube отклоняет IP облачного сервера ("Sign in to confirm you're not a bot"),
-   * мгновенно и незаметно переключается на прямой поток SoundCloud!
+   * Создаёт и ГАРАНТИРОВАННО ПРОВЕРЯЕТ (первые реальные PCM-байты) аудиопоток для AudioMixer.
+   * Если YouTube завис, выдал 403 или пустой поток — мгновенно отменяет YouTube и
+   * автоматически включает проверенный прямой поток с SoundCloud!
    */
-  public static async createPcmSourceForTrack(track: Track): Promise<PcmDecoderHandle> {
+  public static async createPcmSourceForTrack(
+    track: Track
+  ): Promise<{ handle: PcmDecoderHandle; actualSource: string }> {
     // 1. Прямой стриминг с SoundCloud (если трек уже с SoundCloud)
     if (track.streamKind === 'soundcloud-direct' && track.soundcloudTranscodingUrl) {
       try {
         const mediaUrl = await SoundCloudClient.fetchMediaStreamUrl(
           track.soundcloudTranscodingUrl
         );
-        return spawnPcmDecoder(mediaUrl);
-      } catch (scErr) {
-        console.warn(`⚠️ Прямой поток SoundCloud не сработал для "${track.title}":`, scErr);
+        const verified = await verifyPcmStream(
+          spawnPcmDecoder(mediaUrl, 'soundcloud'),
+          10_000
+        );
+        return { handle: verified, actualSource: 'SoundCloud' };
+      } catch (scErr: any) {
+        console.warn(
+          `⚠️ Прямой поток SoundCloud не сработал для "${track.title}": ${scErr?.message || scErr}`
+        );
       }
     }
 
-    // 2. Попытка воспроизведения через YouTube
+    // 2. Попытка воспроизведения через YouTube с проверкой реальных байт
     try {
       let playableUrl = track.url;
-      if (!playableUrl || (!playableUrl.includes('youtube.com') && !playableUrl.includes('youtu.be'))) {
+      if (
+        !playableUrl ||
+        (!playableUrl.includes('youtube.com') && !playableUrl.includes('youtu.be'))
+      ) {
         const q = track.searchQuery || `${track.author} - ${track.title}`;
         const results = await ytdl.search(q);
         const best = results[0];
@@ -771,31 +785,50 @@ export class MusicResolver {
       }
 
       if (playableUrl) {
-        // Сначала явно проверяем getInfo — чтобы сразу поймать "Sign in to confirm you're not a bot"!
         const info = await ytdl.getInfo(playableUrl);
+
+        // Предпочитаем webm/opus (нативно потоковый контейнер без проблем с moov-атомом в pipe:0!)
+        const hasWebmAudio = info.formats.some(
+          (f) => f.hasAudio && !f.hasVideo && f.container === 'webm'
+        );
+
         const rawStream = ytdl.download(info, {
-          filter: { hasAudio: true, hasVideo: false },
-          highWaterMark: 1 << 25,
+          filter: hasWebmAudio
+            ? { hasAudio: true, hasVideo: false, container: 'webm' }
+            : { hasAudio: true, hasVideo: false },
+          highWaterMark: 512 * 1024, // 512KB — мгновенный старт и низкое потребление RAM
+          chunkSize: 1024 * 1024,    // 1MB чанки вместо 10MB (быстрый первый кадр!)
         });
-        return spawnPcmDecoder(rawStream);
+
+        const verified = await verifyPcmStream(
+          spawnPcmDecoder(rawStream, 'youtube'),
+          10_000
+        );
+        return {
+          handle: verified,
+          actualSource: `YouTube (${hasWebmAudio ? 'webm' : 'mp4'})`,
+        };
       }
     } catch (ytErr: any) {
       console.warn(
-        `⚠️ YouTube недоступен для "${track.title}" (${ytErr?.message ?? ytErr}) — пробую фолбэк через SoundCloud...`
+        `⚠️ YouTube не отдал аудио для "${track.title}" (${ytErr?.message ?? ytErr}) — пробую фолбэк через SoundCloud...`
       );
     }
 
-    // 3. Автоматический фолбэк на SoundCloud API v2 (не блокирует IP Oracle Cloud!)
+    // 3. Автоматический фолбэк на SoundCloud API v2 (проверенный PCM поток)
     const fallbackQuery =
       track.searchQuery || cleanTrackQueryForFallback(track.title, track.author);
     const scMediaUrl = await SoundCloudClient.findDirectStreamForQuery(fallbackQuery);
     if (scMediaUrl) {
-      console.log(`🟠 [Fallback] Воспроизвожу "${track.title}" через SoundCloud!`);
-      return spawnPcmDecoder(scMediaUrl);
+      const verified = await verifyPcmStream(
+        spawnPcmDecoder(scMediaUrl, 'soundcloud-fallback'),
+        10_000
+      );
+      return { handle: verified, actualSource: 'SoundCloud (fallback)' };
     }
 
     throw new Error(
-      `YouTube заблокировал IP сервера для "${track.title}", а на SoundCloud аналог не найден. Добавьте data/cookies.txt (YouTube cookies) для полного доступа к YouTube.`
+      `Не удалось получить звук для "${track.title}" ни с YouTube, ни с SoundCloud.`
     );
   }
 }

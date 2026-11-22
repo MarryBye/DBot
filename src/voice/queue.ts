@@ -1,5 +1,5 @@
 import { AudioPlayerStatus } from '@discordjs/voice';
-import { spawnPcmDecoder } from './ffmpeg.js';
+import { spawnPcmDecoder, verifyPcmStream } from './ffmpeg.js';
 import { AudioMixer } from './mixer.js';
 import { MusicResolver, type Track } from './music-resolver.js';
 import type { VoiceWorker } from './worker-pool.js';
@@ -54,9 +54,15 @@ export class AudioQueue {
       this.handleTrackEnd();
     });
 
-    this.worker.player.on(AudioPlayerStatus.Idle, () => {
-      // Если плеер перешёл в Idle, а музыка и SFX не играют — запускаем 5-мин таймер простоя
-      if (!this.currentTrack && this.mixer.activeSfxNames.length === 0) {
+    this.worker.player.on('stateChange', (oldState, newState) => {
+      if (oldState.status !== newState.status) {
+        console.log(`🎚️ [Player #${this.worker.id}] ${oldState.status} → ${newState.status}`);
+      }
+      if (
+        newState.status === AudioPlayerStatus.Idle &&
+        !this.currentTrack &&
+        this.mixer.activeSfxNames.length === 0
+      ) {
         this.startIdleTimer();
         this.worker.notifyStateChange();
       }
@@ -67,9 +73,16 @@ export class AudioQueue {
     if (this.worker.connection) {
       this.worker.connection.subscribe(this.worker.player);
     }
-    const { resource, created } = this.mixer.ensureResource();
-    if (created) {
+
+    const playerStatus = this.worker.player.state.status;
+    // Если плеер по какой-то причине в Idle, принудительно пересоздаём выходной поток микшера!
+    const needRecreate = playerStatus === AudioPlayerStatus.Idle;
+    const { resource, created } = this.mixer.ensureResource(needRecreate);
+
+    if (created && resource) {
       this.worker.player.play(resource);
+    } else if (playerStatus === AudioPlayerStatus.Paused || playerStatus === AudioPlayerStatus.AutoPaused) {
+      this.worker.player.unpause();
     }
   }
 
@@ -103,22 +116,39 @@ export class AudioQueue {
   public async play(track: Track): Promise<void> {
     this.clearIdleTimer();
 
+    // Показываем трек в UI, пока идёт загрузка первых байт
     this.currentTrack = track;
     this.isPaused = false;
     this.pausedAt = null;
     this.totalPausedMs = 0;
+    this.worker.notifyStateChange();
 
     try {
-      const pcmHandle = await MusicResolver.createPcmSourceForTrack(track);
+      const { handle, actualSource } = await MusicResolver.createPcmSourceForTrack(track);
+
+      // Убеждаемся, что трек не пропустили/остановили, пока он загружался
+      if (this.currentTrack?.uid !== track.uid) {
+        handle.cleanup();
+        return;
+      }
+
+      console.log(`▶️ [Worker #${this.worker.id}] Играет [${actualSource}]: ${track.title}`);
       this.mixer.setVolume(this.volume);
-      this.mixer.setMusic(track.title, pcmHandle);
+      this.mixer.setMusic(track.title, handle);
       this.ensureMixerPlaying();
 
       this.startedAt = Date.now();
       this.worker.notifyStateChange();
-    } catch (err) {
-      console.error(`❌ [Queue #${this.worker.id}] Ошибка старта трека "${track.title}":`, err);
-      this.handleTrackEnd();
+    } catch (err: any) {
+      console.error(
+        `❌ [Queue #${this.worker.id}] Не удалось запустить "${track.title}":`,
+        err?.message || err
+      );
+      // Очищаем неудавшийся трек и переходим к следующему
+      if (this.currentTrack?.uid === track.uid) {
+        this.currentTrack = null;
+        this.handleTrackEnd();
+      }
       throw err;
     }
   }
@@ -180,6 +210,7 @@ export class AudioQueue {
     this.isPaused = false;
     this.clearIdleTimer();
     this.mixer.resumeMusic();
+    this.ensureMixerPlaying();
     this.worker.notifyStateChange();
     return true;
   }
@@ -230,9 +261,13 @@ export class AudioQueue {
     }
 
     this.clearIdleTimer();
-    const pcmHandle = spawnPcmDecoder(sourceInput);
+    const verified = await verifyPcmStream(
+      spawnPcmDecoder(sourceInput, `sfx:${effect.name}`),
+      8_000
+    );
+    console.log(`🔊 [Worker #${this.worker.id}] Мем поверх микса: ${effect.name}`);
     this.mixer.setVolume(this.volume);
-    this.mixer.addSfx(effect.name, pcmHandle);
+    this.mixer.addSfx(effect.name, verified);
     this.ensureMixerPlaying();
   }
 
