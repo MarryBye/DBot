@@ -5,6 +5,8 @@ dist
 !.env.example
 *.log
 data/
+cookies.txt
+*cookies*.txt
 *.sqlite
 *.sqlite-journal
 *.db

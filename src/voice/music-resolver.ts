@@ -104,7 +104,7 @@ function loadYouTubeCookie(): string | undefined {
   // 1. Проверяем файл data/cookies.txt (экспорт Netscape из браузера)
   const cookieFilePath = path.join(dataDir, 'cookies.txt');
   if (fs.existsSync(cookieFilePath)) {
-    const content = fs.readFileSync(cookieFilePath, 'utf-8').trim();
+    const content = fs.readFileSync(cookieFilePath, 'utf-8').replace(/\r\n/g, '\n').trim();
     if (content.length > 20) {
       console.log('🍪 [YouTube] Загружены cookies из data/cookies.txt');
       return content;
